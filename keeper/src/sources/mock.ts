@@ -7,6 +7,11 @@ import type { PriceSource, PriceTick } from "./types.ts";
 // around a base value; realized vol is a function of the step magnitude.
 //
 // Spikes can be simulated via the `MOCK_SPIKE_PROB` env var.
+//
+// ⚠️ Decimals: `basePrice` is expected to be raw_quote_per_raw_base × PRICE_SCALE
+// already. Convert a human price first with sources/types.ts'
+// `priceToFairValue(price, baseDecimals, quoteDecimals)`. For equal-decimal
+// pairs (e.g. xStock/USDC both 6dp), that's equivalent to priceHuman * PRICE_SCALE.
 
 export interface MockPriceSourceOpts {
   basePrice: bigint;     // starting value (PRICE_SCALE units). e.g. 100_000_000 = $100
