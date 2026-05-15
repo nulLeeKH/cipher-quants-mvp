@@ -12,7 +12,7 @@
     "build:mainnet": "./scripts/build.sh mainnet",
     "build:devnet": "./scripts/build.sh devnet",
     "build:localnet": "./scripts/build.sh localnet",
-    "test": "anchor test",
+    "test": "pnpm sdk:build && anchor test",
     "sdk:build": "pnpm --filter @solana-boilerplate/sdk build",
     "sdk:dev": "pnpm --filter @solana-boilerplate/sdk dev",
     "app:build": "pnpm --filter @solana-boilerplate/app build",

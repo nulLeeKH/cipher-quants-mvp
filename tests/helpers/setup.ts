@@ -10,18 +10,18 @@ import {
 } from "@solana/spl-token";
 
 // ============================================================================
-// TEST CONTEXT
+// TEST CONTEXT — only test-only utilities live here.
+// PDA derivation / quote signing / event parsing / curve simulate are all
+// provided by the SDK and imported directly from `../sdk/dist`.
+// (Project rule: no duplicate implementations.)
 // ============================================================================
 
 export interface TestContext {
   provider: anchor.AnchorProvider;
-  program: any; // PoC omits anchor.Program<Protocol> typing (would require importing target/types).
+  program: any;
   payer: anchor.web3.Keypair;
 }
 
-/**
- * Creates a basic test context with funded payer.
- */
 export async function setupTestContext(): Promise<TestContext> {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
@@ -47,7 +47,7 @@ export async function fundAccount(
 }
 
 // ============================================================================
-// MINT & ATA HELPERS
+// MINT & ATA HELPERS (validator/SPL Token specific, outside SDK scope)
 // ============================================================================
 
 export async function createTestMint(
@@ -56,26 +56,7 @@ export async function createTestMint(
   decimals: number,
   mintAuthority: anchor.web3.PublicKey
 ): Promise<anchor.web3.PublicKey> {
-  return createMint(
-    provider.connection,
-    payer,
-    mintAuthority,
-    null,
-    decimals
-  );
-}
-
-/**
- * Returns [base, quote] with base.toBuffer() < quote.toBuffer() (lexicographic).
- * Pool PDA seed invariant.
- */
-export function sortMints(
-  mintA: anchor.web3.PublicKey,
-  mintB: anchor.web3.PublicKey
-): [anchor.web3.PublicKey, anchor.web3.PublicKey] {
-  const a = mintA.toBuffer();
-  const b = mintB.toBuffer();
-  return Buffer.compare(a, b) < 0 ? [mintA, mintB] : [mintB, mintA];
+  return createMint(provider.connection, payer, mintAuthority, null, decimals);
 }
 
 export async function getOrCreateATA(
@@ -107,61 +88,12 @@ export async function mintTokensTo(
   destination: anchor.web3.PublicKey,
   amount: bigint | number
 ): Promise<void> {
-  await mintTo(
-    provider.connection,
-    payer,
-    mint,
-    destination,
-    payer, // mint authority (same as payer in tests)
-    amount
-  );
+  await mintTo(provider.connection, payer, mint, destination, payer, amount);
 }
 
 // ============================================================================
-// PDA DERIVATION
+// Test fixtures (default params — the SDK ships no fixtures; these are test-only)
 // ============================================================================
-
-export function derivePoolState(
-  programId: anchor.web3.PublicKey,
-  baseMint: anchor.web3.PublicKey,
-  quoteMint: anchor.web3.PublicKey
-): [anchor.web3.PublicKey, number] {
-  return anchor.web3.PublicKey.findProgramAddressSync(
-    [Buffer.from("pool"), baseMint.toBuffer(), quoteMint.toBuffer()],
-    programId
-  );
-}
-
-export function deriveVault(
-  programId: anchor.web3.PublicKey,
-  poolState: anchor.web3.PublicKey,
-  mint: anchor.web3.PublicKey
-): [anchor.web3.PublicKey, number] {
-  return anchor.web3.PublicKey.findProgramAddressSync(
-    [Buffer.from("vault"), poolState.toBuffer(), mint.toBuffer()],
-    programId
-  );
-}
-
-export function deriveQuoteNonceMarker(
-  programId: anchor.web3.PublicKey,
-  poolState: anchor.web3.PublicKey,
-  nonce: bigint
-): [anchor.web3.PublicKey, number] {
-  const nonceBuf = Buffer.alloc(8);
-  nonceBuf.writeBigUInt64LE(nonce);
-  return anchor.web3.PublicKey.findProgramAddressSync(
-    [Buffer.from("quote_used"), poolState.toBuffer(), nonceBuf],
-    programId
-  );
-}
-
-// ============================================================================
-// PARAMS (defaults)
-// ============================================================================
-
-export const PRICE_SCALE = 1_000_000n;
-export const BPS_DENOMINATOR = 10_000n;
 
 export function defaultDepthParams() {
   return {
@@ -179,111 +111,6 @@ export function defaultSkewParams() {
     maxSkewOffsetBps: 100,
     reserved: Array(10).fill(0),
   };
-}
-
-// ============================================================================
-// SignedQuote canonical serialization (97 bytes)
-// ============================================================================
-
-export type Direction = "buy" | "sell";
-
-export interface SignedQuoteData {
-  pool: anchor.web3.PublicKey;
-  user: anchor.web3.PublicKey;
-  direction: Direction;
-  inputAmount: bigint;
-  price: bigint;
-  expirySlot: bigint;
-  nonce: bigint;
-}
-
-/**
- * Borsh serialize SignedQuoteMessage → 97 bytes.
- * Field order: pool, user, direction, input_amount, price, expiry_slot, nonce.
- */
-export function serializeSignedQuoteMessage(data: SignedQuoteData): Buffer {
-  const buf = Buffer.alloc(97);
-  data.pool.toBuffer().copy(buf, 0); // 32
-  data.user.toBuffer().copy(buf, 32); // 32
-  buf[64] = data.direction === "buy" ? 0 : 1; // 1 (Borsh enum)
-  buf.writeBigUInt64LE(data.inputAmount, 65); // 8
-  buf.writeBigUInt64LE(data.price, 73); // 8
-  buf.writeBigUInt64LE(data.expirySlot, 81); // 8
-  buf.writeBigUInt64LE(data.nonce, 89); // 8
-  return buf;
-}
-
-/**
- * Build a SignedQuote (with ed25519 signature) + the ed25519 verify instruction
- * to prepend to the transaction. Returns both so caller can construct tx.
- */
-export function buildSignedQuoteWithVerifyIx(
-  oracleSigner: anchor.web3.Keypair,
-  data: SignedQuoteData
-): {
-  signedQuote: any;
-  verifyIx: anchor.web3.TransactionInstruction;
-  messageBytes: Buffer;
-} {
-  const messageBytes = serializeSignedQuoteMessage(data);
-
-  // Ed25519Program signs internally; signature is extracted from the instruction data.
-  const verifyIx = anchor.web3.Ed25519Program.createInstructionWithPrivateKey({
-    privateKey: oracleSigner.secretKey,
-    message: messageBytes,
-  });
-
-  // ed25519 program data layout: signature_offset at bytes 2-3 (u16 LE),
-  // signature 64 bytes from sigOffset.
-  const sigOffset = verifyIx.data.readUInt16LE(2);
-  const signature = verifyIx.data.slice(sigOffset, sigOffset + 64);
-  if (signature.length !== 64) {
-    throw new Error(`expected 64-byte signature, got ${signature.length}`);
-  }
-
-  const signedQuote = {
-    pool: data.pool,
-    user: data.user,
-    direction: data.direction === "buy" ? { buy: {} } : { sell: {} },
-    inputAmount: new anchor.BN(data.inputAmount.toString()),
-    price: new anchor.BN(data.price.toString()),
-    expirySlot: new anchor.BN(data.expirySlot.toString()),
-    nonce: new anchor.BN(data.nonce.toString()),
-    signature: Array.from(signature),
-  };
-
-  return { signedQuote, verifyIx, messageBytes: Buffer.from(messageBytes) };
-}
-
-// ============================================================================
-// Event parsing
-// ============================================================================
-
-/**
- * Parse Anchor events from a confirmed transaction's logs.
- * Returns array of { name, data } in the order they were emitted.
- */
-export async function parseEvents(
-  provider: anchor.AnchorProvider,
-  program: any,
-  signature: string
-): Promise<{ name: string; data: any }[]> {
-  await provider.connection.confirmTransaction(signature, "confirmed");
-  const tx = await provider.connection.getTransaction(signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0,
-  });
-  if (!tx?.meta?.logMessages) return [];
-
-  const parser = new anchor.EventParser(
-    program.programId,
-    new anchor.BorshCoder(program.idl)
-  );
-  const events: { name: string; data: any }[] = [];
-  for (const event of parser.parseLogs(tx.meta.logMessages)) {
-    events.push({ name: event.name, data: event.data });
-  }
-  return events;
 }
 
 // ============================================================================

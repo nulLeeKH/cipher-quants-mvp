@@ -1,37 +1,14 @@
 // ============================================================================
 // SDK Instruction Builders
 // ============================================================================
-// Each on-chain instruction should have a corresponding SDK builder here.
-// The builder returns a TransactionInstruction (not a signed transaction),
-// allowing callers to compose multiple instructions into a single transaction.
+// Each builder returns a TransactionInstruction (not a signed Transaction),
+// so callers can compose multiple ix in one tx + prepend ed25519 verify +
+// add priority fees.
 //
-// Pattern:
-//
-//   export interface MyInstructionParams {
-//     user: PublicKey;
-//     amount: BN;
-//     // ... all required parameters
-//   }
-//
-//   export async function createMyInstruction(
-//     program: Program,
-//     params: MyInstructionParams
-//   ): Promise<TransactionInstruction> {
-//     const myPda = getMyAddress(params.someId);
-//
-//     return await program.methods
-//       .myInstruction(params.amount)
-//       .accountsPartial({
-//         user: params.user,
-//         myAccount: myPda,
-//         systemProgram: SystemProgram.programId,
-//       })
-//       .instruction();
-//   }
-//
-// Benefits of returning instructions (not transactions):
-//   - Batch multiple instructions into one transaction
-//   - Simulate before sending
-//   - Add priority fees
-//   - Custom retry logic in keeper bots
+// Spec: docs/SPECIFICATION.md §3
 // ============================================================================
+
+export * from "./init_pool.js";
+export * from "./update_oracle.js";
+export * from "./execute_swap.js";
+export * from "./admin_ops.js";

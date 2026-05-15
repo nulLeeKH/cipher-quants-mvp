@@ -1,14 +1,12 @@
 {
   "name": "@solana-boilerplate/sdk",
   "version": "0.0.1",
-  "description": "TypeScript SDK for the Solana protocol",
-  "type": "module",
+  "description": "TypeScript SDK for the Cipher Quants Program",
   "main": "dist/index.js",
-  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
+      "require": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
   },
@@ -17,6 +15,7 @@
     "src"
   ],
   "scripts": {
+    "prebuild": "../scripts/copy-idl.sh",
     "build": "tsc",
     "clean": "rm -rf dist",
     "dev": "tsc --watch"

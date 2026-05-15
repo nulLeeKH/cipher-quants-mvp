@@ -5,20 +5,24 @@ import {
   setupTestContext,
   fundAccount,
   createTestMint,
-  sortMints,
   getOrCreateATA,
   mintTokensTo,
-  derivePoolState,
-  deriveVault,
-  deriveQuoteNonceMarker,
   defaultDepthParams,
   defaultSkewParams,
-  buildSignedQuoteWithVerifyIx,
-  parseEvents,
-  PRICE_SCALE,
   TOKEN_PROGRAM_ID,
   TestContext,
 } from "./helpers/setup";
+// Import SDK directly — no duplicate helpers.
+import {
+  derivePoolState,
+  deriveVault,
+  deriveQuoteNonceMarker,
+  sortMints,
+  buildSignedQuoteWithVerifyIx,
+  parseEventsFromTx,
+  simulateSwap,
+  PRICE_SCALE,
+} from "../sdk/dist";
 
 const FAIR = new anchor.BN(100_000_000); // $100 × PRICE_SCALE(1e6)
 const SPREAD_BPS = 20;
@@ -67,13 +71,9 @@ describe("Protocol", () => {
     );
     [baseMint, quoteMint] = sortMints(mintA, mintB);
 
-    [poolState] = derivePoolState(
-      ctx.program.programId,
-      baseMint,
-      quoteMint
-    );
-    [baseVault] = deriveVault(ctx.program.programId, poolState, baseMint);
-    [quoteVault] = deriveVault(ctx.program.programId, poolState, quoteMint);
+    [poolState] = derivePoolState(baseMint, quoteMint);
+    [baseVault] = deriveVault(poolState, baseMint);
+    [quoteVault] = deriveVault(poolState, quoteMint);
 
     // Admin/user ATAs
     adminBaseAta = await getOrCreateATA(
@@ -207,9 +207,9 @@ describe("Protocol", () => {
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const [b, q] = sortMints(mintA, mintB);
       // Intentionally init in (quote, base) order to provoke the error.
-      const [wrongPool] = derivePoolState(ctx.program.programId, q, b);
-      const [wrongBaseVault] = deriveVault(ctx.program.programId, wrongPool, q);
-      const [wrongQuoteVault] = deriveVault(ctx.program.programId, wrongPool, b);
+      const [wrongPool] = derivePoolState(q, b);
+      const [wrongBaseVault] = deriveVault(wrongPool, q);
+      const [wrongQuoteVault] = deriveVault(wrongPool, b);
 
       await expect(
         ctx.program.methods
@@ -243,9 +243,9 @@ describe("Protocol", () => {
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const [b, q] = sortMints(mintA, mintB);
-      const [pool] = derivePoolState(ctx.program.programId, b, q);
-      const [bv] = deriveVault(ctx.program.programId, pool, b);
-      const [qv] = deriveVault(ctx.program.programId, pool, q);
+      const [pool] = derivePoolState(b, q);
+      const [bv] = deriveVault(pool, b);
+      const [qv] = deriveVault(pool, q);
 
       await expect(
         ctx.program.methods
@@ -279,9 +279,9 @@ describe("Protocol", () => {
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const [b, q] = sortMints(mintA, mintB);
-      const [pool] = derivePoolState(ctx.program.programId, b, q);
-      const [bv] = deriveVault(ctx.program.programId, pool, b);
-      const [qv] = deriveVault(ctx.program.programId, pool, q);
+      const [pool] = derivePoolState(b, q);
+      const [bv] = deriveVault(pool, b);
+      const [qv] = deriveVault(pool, q);
 
       await expect(
         ctx.program.methods
@@ -315,9 +315,9 @@ describe("Protocol", () => {
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const [b, q] = sortMints(mintA, mintB);
-      const [pool] = derivePoolState(ctx.program.programId, b, q);
-      const [bv] = deriveVault(ctx.program.programId, pool, b);
-      const [qv] = deriveVault(ctx.program.programId, pool, q);
+      const [pool] = derivePoolState(b, q);
+      const [bv] = deriveVault(pool, b);
+      const [qv] = deriveVault(pool, q);
 
       const sig = await ctx.program.methods
         .initPool(
@@ -342,10 +342,8 @@ describe("Protocol", () => {
         .signers([newAdmin])
         .rpc();
 
-      const events = await parseEvents(ctx.provider, ctx.program, sig);
-      const initEvent = events.find(
-        (e) => e.name === "PoolInitialized" || e.name === "poolInitialized"
-      );
+      const events = await parseEventsFromTx(ctx.provider, sig);
+      const initEvent = events.find((e) => e.name === "PoolInitialized");
       expect(initEvent).toBeDefined();
       const data: any = initEvent!.data;
       expect(data.pool.toString()).toBe(pool.toString());
@@ -464,15 +462,19 @@ describe("Protocol", () => {
   // execute_swap — Curve path
   // ==========================================================================
   describe("execute_swap (curve fresh)", () => {
-    beforeAll(async () => {
-      // Bump oracle freshness for curve path. Applies Mode B (TTL=3).
+    // Mode B (TTL=3 ≈ 1.2s) risks going stale between `it`s (~hundreds of ms each in jest).
+    // Re-push oracle right before each `it` to guarantee curve_age==0; nonce is a monotonic counter.
+    let oracleNonceCounter = 10;
+
+    beforeEach(async () => {
+      oracleNonceCounter += 1;
       await ctx.program.methods
         .updateOracle(
           FAIR,
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(10), // nonce jump (still satisfies monotonic constraint)
+          new anchor.BN(oracleNonceCounter),
           TTL_MODE_B
         )
         .accountsPartial({
@@ -606,6 +608,64 @@ describe("Protocol", () => {
       ).rejects.toThrow(/InvalidSize/);
     });
 
+    it("SDK simulateSwap matches on-chain swap output (bit-for-bit)", async () => {
+      // Verify the SDK's client-side simulate matches on-chain execute_swap output.
+      // (simulateSwap in helpers/setup.ts is an inline port of sdk/src/math/curve.ts.)
+      const pool: any = await ctx.program.account.poolState.fetch(poolState);
+      const baseVaultAcc = await getAccount(ctx.provider.connection, baseVault);
+      const quoteVaultAcc = await getAccount(ctx.provider.connection, quoteVault);
+
+      const inputAmount = 2_000n;
+      const expected = simulateSwap({
+        fairValue: BigInt(pool.fairValue.toString()),
+        spreadBps: BigInt(pool.spreadBps),
+        depth: {
+          depthCoefBps: BigInt(pool.depthCurveParams.depthCoefBps),
+          sizeUnit: BigInt(pool.depthCurveParams.sizeUnit.toString()),
+          maxDepthBps: BigInt(pool.depthCurveParams.maxDepthBps),
+        },
+        skew: {
+          targetBaseBps: BigInt(pool.inventorySkewParams.targetBaseBps),
+          skewCoefBps: BigInt(pool.inventorySkewParams.skewCoefBps),
+          maxSkewOffsetBps: BigInt(pool.inventorySkewParams.maxSkewOffsetBps),
+        },
+        reservesBase: baseVaultAcc.amount,
+        reservesQuote: quoteVaultAcc.amount,
+        inputAmount,
+        direction: "sell",
+      });
+
+      const userQuoteBefore = (
+        await getAccount(ctx.provider.connection, userQuoteAta)
+      ).amount;
+      await ctx.program.methods
+        .executeSwap(
+          new anchor.BN(inputAmount.toString()),
+          { sell: {} },
+          new anchor.BN(0),
+          null
+        )
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .signers([user])
+        .rpc();
+      const userQuoteAfter = (
+        await getAccount(ctx.provider.connection, userQuoteAta)
+      ).amount;
+      const actualOutput = userQuoteAfter - userQuoteBefore;
+
+      expect(actualOutput).toBe(expected.outputAmount);
+    });
+
     it("emits SwapExecuted event with mode=0 (curve)", async () => {
       const inputAmount = new anchor.BN(1_000);
       const sig = await ctx.program.methods
@@ -624,10 +684,8 @@ describe("Protocol", () => {
         .signers([user])
         .rpc();
 
-      const events = await parseEvents(ctx.provider, ctx.program, sig);
-      const swap = events.find(
-        (e) => e.name === "SwapExecuted" || e.name === "swapExecuted"
-      );
+      const events = await parseEventsFromTx(ctx.provider, sig);
+      const swap = events.find((e) => e.name === "SwapExecuted");
       expect(swap).toBeDefined();
       const d: any = swap!.data;
       expect(d.pool.toString()).toBe(poolState.toString());
@@ -665,11 +723,7 @@ describe("Protocol", () => {
           nonce,
         }
       );
-      const [marker] = deriveQuoteNonceMarker(
-        ctx.program.programId,
-        poolState,
-        nonce
-      );
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
 
       // Bundle oracle push + swap in the same tx → both land in the same slot → curve_age = 0 → TTL=3 fresh.
       const oracleIx = await ctx.program.methods
@@ -678,8 +732,8 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(15),  // > 10 (nonce from the preceding describe)
-          TTL_MODE_B          // **operating value: Mode B=3**
+          new anchor.BN(30), // safely larger than the curve-fresh describe's beforeEach counter (~16)
+          TTL_MODE_B         // **operating value: Mode B=3**
         )
         .accountsPartial({
           oracleSigner: oracleSigner.publicKey,
@@ -724,10 +778,8 @@ describe("Protocol", () => {
       expect(markerAccount).toBeNull();
 
       // 2. The SwapExecuted event mode is 0 (curve).
-      const events = await parseEvents(ctx.provider, ctx.program, sig);
-      const swap = events.find(
-        (e) => e.name === "SwapExecuted" || e.name === "swapExecuted"
-      );
+      const events = await parseEventsFromTx(ctx.provider, sig);
+      const swap = events.find((e) => e.name === "SwapExecuted");
       expect(swap).toBeDefined();
       expect((swap!.data as any).mode).toBe(0);
       const qNonce = (swap!.data as any).quoteNonce ?? (swap!.data as any).quote_nonce;
@@ -747,7 +799,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(20),
+          new anchor.BN(35), // > 30 (the §3.1 describe's oracleIx nonce)
           0 // Mode C — force the curve stale
         )
         .accountsPartial({
@@ -798,11 +850,7 @@ describe("Protocol", () => {
         }
       );
 
-      const [marker] = deriveQuoteNonceMarker(
-        ctx.program.programId,
-        poolState,
-        nonce
-      );
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
 
       const swapIx = await ctx.program.methods
         .executeSwap(
@@ -853,7 +901,7 @@ describe("Protocol", () => {
           nonce,
         }
       );
-      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
         .accountsPartial({
@@ -889,7 +937,7 @@ describe("Protocol", () => {
           nonce,
         }
       );
-      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(
           new anchor.BN(1_000),
@@ -928,7 +976,7 @@ describe("Protocol", () => {
         expirySlot: BigInt(slot + 200),
         nonce,
       });
-      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
         .accountsPartial({
@@ -967,7 +1015,7 @@ describe("Protocol", () => {
           nonce,
         }
       );
-      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
         .accountsPartial({
@@ -1004,7 +1052,7 @@ describe("Protocol", () => {
           nonce,
         }
       );
-      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
         .accountsPartial({
@@ -1039,11 +1087,7 @@ describe("Protocol", () => {
         }
       );
 
-      const [marker] = deriveQuoteNonceMarker(
-        ctx.program.programId,
-        poolState,
-        1n
-      );
+      const [marker] = deriveQuoteNonceMarker(poolState, 1n);
 
       const swapIx = await ctx.program.methods
         .executeSwap(
@@ -1365,11 +1409,7 @@ describe("Protocol", () => {
   // ==========================================================================
   describe("close_expired_nonce", () => {
     it("rejects close before expiry+buffer", async () => {
-      const [marker] = deriveQuoteNonceMarker(
-        ctx.program.programId,
-        poolState,
-        1n // marker initialized by the RFQ test
-      );
+      const [marker] = deriveQuoteNonceMarker(poolState, 1n); // marker initialized by the RFQ test
 
       // expiry+buffer has not elapsed yet (right after the RFQ test)
       await expect(
