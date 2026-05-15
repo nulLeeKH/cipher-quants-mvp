@@ -1,0 +1,32 @@
+# Anchor
+.anchor
+target
+
+# Node
+node_modules
+dist
+
+# Test output
+test_result.json
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Deno
+keeper/node_modules
+keeper/keeper
+
+# Build artifacts
+*.so

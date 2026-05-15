@@ -1,36 +1,21 @@
 // ============================================================================
 // INSTRUCTION MODULES
 // ============================================================================
-// Each instruction handler lives in its own file. This enforces:
-//   - Clear boundaries: AI modifies one file per instruction
-//   - Safe refactoring: changes to one instruction can't break another
-//   - Easy navigation: "modify deposit" → open deposit.rs
-//
-// To add a new instruction:
-//   1. Create a new file: instructions/my_instruction.rs
-//   2. Add `pub mod my_instruction;` and `pub use my_instruction::*;` below
-//   3. Add the entry point in lib.rs
-//   4. Update CLAUDE.md: Architecture section + PDA Seeds table
-//
-// Handler pattern (3-phase):
-//
-//   pub fn process_my_instruction(ctx: Context<MyInstruction>, args...) -> Result<()> {
-//       // Phase 1: Validation & Calculation (immutable borrow scope)
-//       let result = {
-//           let state = &ctx.accounts.my_state;
-//           require!(!state.is_paused, ErrorCode::Paused);
-//           // ... all reads and math here
-//           calculated_value
-//       }; // immutable borrow ends
-//
-//       // Phase 2: CPIs (token transfers, mints, burns)
-//       let signer_seeds = &[&[b"pda_seed", &[bump]][..]];
-//       token::transfer(ctx.accounts.into_transfer_ctx().with_signer(signer_seeds), amount)?;
-//
-//       // Phase 3: State update (mutable borrow)
-//       let state = &mut ctx.accounts.my_state;
-//       state.value = result;
-//
-//       Ok(())
-//   }
-// ============================================================================
+// All instruction handlers. The lib.rs entry points delegate to this module.
+// Spec: docs/SPECIFICATION.md §3.
+
+pub mod admin_withdraw_inventory;
+pub mod close_expired_nonce;
+pub mod execute_swap;
+pub mod init_pool;
+pub mod rotate_oracle_signer;
+pub mod set_paused;
+pub mod update_oracle;
+
+pub use admin_withdraw_inventory::*;
+pub use close_expired_nonce::*;
+pub use execute_swap::*;
+pub use init_pool::*;
+pub use rotate_oracle_signer::*;
+pub use set_paused::*;
+pub use update_oracle::*;

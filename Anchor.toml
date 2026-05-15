@@ -7,7 +7,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-protocol = "11111111111111111111111111111111"
+protocol = "3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy"
 
 [registry]
 url = "https://api.apr.dev"
