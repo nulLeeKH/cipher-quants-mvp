@@ -256,6 +256,37 @@ export function buildSignedQuoteWithVerifyIx(
 }
 
 // ============================================================================
+// Event parsing
+// ============================================================================
+
+/**
+ * Parse Anchor events from a confirmed transaction's logs.
+ * Returns array of { name, data } in the order they were emitted.
+ */
+export async function parseEvents(
+  provider: anchor.AnchorProvider,
+  program: any,
+  signature: string
+): Promise<{ name: string; data: any }[]> {
+  await provider.connection.confirmTransaction(signature, "confirmed");
+  const tx = await provider.connection.getTransaction(signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0,
+  });
+  if (!tx?.meta?.logMessages) return [];
+
+  const parser = new anchor.EventParser(
+    program.programId,
+    new anchor.BorshCoder(program.idl)
+  );
+  const events: { name: string; data: any }[] = [];
+  for (const event of parser.parseLogs(tx.meta.logMessages)) {
+    events.push({ name: event.name, data: event.data });
+  }
+  return events;
+}
+
+// ============================================================================
 // Re-exports
 // ============================================================================
 export { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID };

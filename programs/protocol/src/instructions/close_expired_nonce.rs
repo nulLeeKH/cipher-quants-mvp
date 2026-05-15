@@ -2,9 +2,10 @@ use anchor_lang::prelude::*;
 
 use crate::constants::SAFETY_BUFFER_SLOTS;
 use crate::error::ErrorCode;
+use crate::events::QuoteMarkerClosed;
 use crate::state::{PoolState, QuoteNonceMarker};
 
-// docs/SPECIFICATION.md §3.7
+// docs/SPECIFICATION.md §3.8
 
 #[derive(Accounts)]
 pub struct CloseExpiredNonce<'info> {
@@ -28,6 +29,15 @@ pub fn process_close_expired_nonce(ctx: Context<CloseExpiredNonce>) -> Result<()
         marker.expiry_slot.saturating_add(SAFETY_BUFFER_SLOTS) < now,
         ErrorCode::NonceNotYetClosable
     );
+
+    emit!(QuoteMarkerClosed {
+        pool: ctx.accounts.pool_state.key(),
+        closer: ctx.accounts.closer.key(),
+        nonce: marker.nonce,
+        expiry_slot: marker.expiry_slot,
+        slot: now,
+    });
+
     // Anchor's `close = closer` attribute handles rent reclamation.
     Ok(())
 }

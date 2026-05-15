@@ -14,6 +14,7 @@ import {
   defaultDepthParams,
   defaultSkewParams,
   buildSignedQuoteWithVerifyIx,
+  parseEvents,
   PRICE_SCALE,
   TOKEN_PROGRAM_ID,
   TestContext,
@@ -196,6 +197,165 @@ describe("Protocol", () => {
           .signers([admin])
           .rpc()
       ).rejects.toThrow();
+    });
+
+    it("rejects mints not sorted (base > quote)", async () => {
+      // Try a different admin/mint pair, but with swapped order → MintsNotSorted.
+      const otherAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      // Intentionally init in (quote, base) order to provoke the error.
+      const [wrongPool] = derivePoolState(ctx.program.programId, q, b);
+      const [wrongBaseVault] = deriveVault(ctx.program.programId, wrongPool, q);
+      const [wrongQuoteVault] = deriveVault(ctx.program.programId, wrongPool, b);
+
+      await expect(
+        ctx.program.methods
+          .initPool(
+            oracleSigner.publicKey,
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            0
+          )
+          .accountsPartial({
+            admin: otherAdmin.publicKey,
+            poolState: wrongPool,
+            baseMint: q,
+            quoteMint: b,
+            baseVault: wrongBaseVault,
+            quoteVault: wrongQuoteVault,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .signers([otherAdmin])
+          .rpc()
+      ).rejects.toThrow(/MintsNotSorted/);
+    });
+
+    it("rejects fair_value = 0", async () => {
+      const otherAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      const [pool] = derivePoolState(ctx.program.programId, b, q);
+      const [bv] = deriveVault(ctx.program.programId, pool, b);
+      const [qv] = deriveVault(ctx.program.programId, pool, q);
+
+      await expect(
+        ctx.program.methods
+          .initPool(
+            oracleSigner.publicKey,
+            new anchor.BN(0),
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            0
+          )
+          .accountsPartial({
+            admin: otherAdmin.publicKey,
+            poolState: pool,
+            baseMint: b,
+            quoteMint: q,
+            baseVault: bv,
+            quoteVault: qv,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .signers([otherAdmin])
+          .rpc()
+      ).rejects.toThrow(/InvalidFairValue/);
+    });
+
+    it("rejects spread > MAX_SPREAD_BPS", async () => {
+      const otherAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      const [pool] = derivePoolState(ctx.program.programId, b, q);
+      const [bv] = deriveVault(ctx.program.programId, pool, b);
+      const [qv] = deriveVault(ctx.program.programId, pool, q);
+
+      await expect(
+        ctx.program.methods
+          .initPool(
+            oracleSigner.publicKey,
+            FAIR,
+            5000, // MAX_SPREAD_BPS = 1000
+            defaultDepthParams(),
+            defaultSkewParams(),
+            0
+          )
+          .accountsPartial({
+            admin: otherAdmin.publicKey,
+            poolState: pool,
+            baseMint: b,
+            quoteMint: q,
+            baseVault: bv,
+            quoteVault: qv,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .signers([otherAdmin])
+          .rpc()
+      ).rejects.toThrow(/InvalidSpread/);
+    });
+
+    it("emits PoolInitialized event", async () => {
+      const newAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, newAdmin.publicKey, 20);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      const [pool] = derivePoolState(ctx.program.programId, b, q);
+      const [bv] = deriveVault(ctx.program.programId, pool, b);
+      const [qv] = deriveVault(ctx.program.programId, pool, q);
+
+      const sig = await ctx.program.methods
+        .initPool(
+          oracleSigner.publicKey,
+          FAIR,
+          SPREAD_BPS,
+          defaultDepthParams(),
+          defaultSkewParams(),
+          0
+        )
+        .accountsPartial({
+          admin: newAdmin.publicKey,
+          poolState: pool,
+          baseMint: b,
+          quoteMint: q,
+          baseVault: bv,
+          quoteVault: qv,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([newAdmin])
+        .rpc();
+
+      const events = await parseEvents(ctx.provider, ctx.program, sig);
+      const initEvent = events.find(
+        (e) => e.name === "PoolInitialized" || e.name === "poolInitialized"
+      );
+      expect(initEvent).toBeDefined();
+      const data: any = initEvent!.data;
+      expect(data.pool.toString()).toBe(pool.toString());
+      expect(data.admin.toString()).toBe(newAdmin.publicKey.toString());
+      const fairVal = data.initialFairValue ?? data.initial_fair_value;
+      expect(fairVal.toString()).toBe(FAIR.toString());
+      const spread = data.initialSpreadBps ?? data.initial_spread_bps;
+      expect(spread).toBe(SPREAD_BPS);
+      const ttl = data.initialModeTtl ?? data.initial_mode_ttl;
+      expect(ttl).toBe(0);
     });
   });
 
@@ -425,6 +585,154 @@ describe("Protocol", () => {
           .rpc()
       ).rejects.toThrow(/SlippageExceeded/);
     });
+
+    it("rejects input_amount = 0", async () => {
+      await expect(
+        ctx.program.methods
+          .executeSwap(new anchor.BN(0), { sell: {} }, new anchor.BN(0), null)
+          .accountsPartial({
+            user: user.publicKey,
+            poolState,
+            baseVault,
+            quoteVault,
+            userBaseAta,
+            userQuoteAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .signers([user])
+          .rpc()
+      ).rejects.toThrow(/InvalidSize/);
+    });
+
+    it("emits SwapExecuted event with mode=0 (curve)", async () => {
+      const inputAmount = new anchor.BN(1_000);
+      const sig = await ctx.program.methods
+        .executeSwap(inputAmount, { sell: {} }, new anchor.BN(0), null)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .signers([user])
+        .rpc();
+
+      const events = await parseEvents(ctx.provider, ctx.program, sig);
+      const swap = events.find(
+        (e) => e.name === "SwapExecuted" || e.name === "swapExecuted"
+      );
+      expect(swap).toBeDefined();
+      const d: any = swap!.data;
+      expect(d.pool.toString()).toBe(poolState.toString());
+      expect(d.user.toString()).toBe(user.publicKey.toString());
+      expect(d.direction).toBe(1); // Sell
+      expect(d.mode).toBe(0); // curve
+      const input = d.inputAmount ?? d.input_amount;
+      expect(input.toString()).toBe(inputAmount.toString());
+      const price = d.executionPrice ?? d.execution_price;
+      expect(price.gtn(0)).toBe(true);
+      const qNonce = d.quoteNonce ?? d.quote_nonce;
+      expect(qNonce.toString()).toBe("0"); // curve path
+    });
+  });
+
+  // ==========================================================================
+  // execute_swap — §3.1 decision check: when the curve is fresh, signed_quote is ignored.
+  // ==========================================================================
+  // **Honest pattern**: bundle update_oracle + execute_swap in the same tx so curve_age=0
+  // is guaranteed. We use the operating value Mode B (TTL=3) directly rather than
+  // artificially inflating TTL to dodge timing — freshness comes from instruction ordering.
+  describe("execute_swap (3.1 policy: curve overrides quote)", () => {
+    it("when curve is fresh, attaching signed_quote still executes via curve and the quote_nonce_marker is NOT initialized", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 9999n;
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
+        oracleSigner,
+        {
+          pool: poolState,
+          user: user.publicKey,
+          direction: "sell",
+          inputAmount: 1_000n,
+          price: 999_999_999n, // intentionally different from the curve price
+          expirySlot: BigInt(slot + 200),
+          nonce,
+        }
+      );
+      const [marker] = deriveQuoteNonceMarker(
+        ctx.program.programId,
+        poolState,
+        nonce
+      );
+
+      // Bundle oracle push + swap in the same tx → both land in the same slot → curve_age = 0 → TTL=3 fresh.
+      const oracleIx = await ctx.program.methods
+        .updateOracle(
+          FAIR,
+          SPREAD_BPS,
+          defaultDepthParams(),
+          defaultSkewParams(),
+          new anchor.BN(15),  // > 10 (nonce from the preceding describe)
+          TTL_MODE_B          // **operating value: Mode B=3**
+        )
+        .accountsPartial({
+          oracleSigner: oracleSigner.publicKey,
+          poolState,
+        })
+        .instruction();
+
+      const swapIx = await ctx.program.methods
+        .executeSwap(
+          new anchor.BN(1_000),
+          { sell: {} },
+          new anchor.BN(0),
+          signedQuote
+        )
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([
+          { pubkey: marker, isSigner: false, isWritable: true },
+        ])
+        .instruction();
+
+      // Order: oracleIx(0) → verifyIx(1) → swapIx(2). swapIx's previous instruction is verifyIx.
+      const tx = new anchor.web3.Transaction()
+        .add(oracleIx)
+        .add(verifyIx)
+        .add(swapIx);
+      const sig = await ctx.provider.sendAndConfirm(tx, [oracleSigner, user]);
+
+      // Verify the quote was ignored:
+      // 1. quote_nonce_marker is NOT initialized (curve path does not create the marker).
+      const markerAccount =
+        await ctx.provider.connection.getAccountInfo(marker);
+      expect(markerAccount).toBeNull();
+
+      // 2. The SwapExecuted event mode is 0 (curve).
+      const events = await parseEvents(ctx.provider, ctx.program, sig);
+      const swap = events.find(
+        (e) => e.name === "SwapExecuted" || e.name === "swapExecuted"
+      );
+      expect(swap).toBeDefined();
+      expect((swap!.data as any).mode).toBe(0);
+      const qNonce = (swap!.data as any).quoteNonce ?? (swap!.data as any).quote_nonce;
+      expect(qNonce.toString()).toBe("0");
+    });
   });
 
   // ==========================================================================
@@ -529,6 +837,193 @@ describe("Protocol", () => {
       expect((markerAcc as any).nonce.toString()).toBe("1");
     });
 
+    it("rejects RFQ with wrong user", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 1001n;
+      const fakeUser = anchor.web3.Keypair.generate();
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
+        oracleSigner,
+        {
+          pool: poolState,
+          user: fakeUser.publicKey, // wrong user
+          direction: "sell",
+          inputAmount: 1_000n,
+          price: 100_000_000n,
+          expirySlot: BigInt(slot + 200),
+          nonce,
+        }
+      );
+      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey, // actual tx signer is `user`, which mismatches the quote's user
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow();
+    });
+
+    it("rejects RFQ with wrong direction", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 1003n;
+      // quote is signed as sell but the instruction is buy
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
+        oracleSigner,
+        {
+          pool: poolState,
+          user: user.publicKey,
+          direction: "sell",
+          inputAmount: 1_000n,
+          price: 100_000_000n,
+          expirySlot: BigInt(slot + 200),
+          nonce,
+        }
+      );
+      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(
+          new anchor.BN(1_000),
+          { buy: {} }, // direction mismatch
+          new anchor.BN(0),
+          signedQuote
+        )
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
+        /QuoteDirectionMismatch/
+      );
+    });
+
+    it("rejects RFQ without ed25519 verify instruction prepended", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 1004n;
+      const { signedQuote } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+        pool: poolState,
+        user: user.publicKey,
+        direction: "sell",
+        inputAmount: 1_000n,
+        price: 100_000_000n,
+        expirySlot: BigInt(slot + 200),
+        nonce,
+      });
+      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      // verifyIx is intentionally NOT attached
+      const tx = new anchor.web3.Transaction().add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
+        /QuoteSignatureInvalid/
+      );
+    });
+
+    it("rejects RFQ quote signed by wrong key", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 1005n;
+      const fakeSigner = anchor.web3.Keypair.generate();
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
+        fakeSigner, // a key other than authorized_oracle_signer
+        {
+          pool: poolState,
+          user: user.publicKey,
+          direction: "sell",
+          inputAmount: 1_000n,
+          price: 100_000_000n,
+          expirySlot: BigInt(slot + 200),
+          nonce,
+        }
+      );
+      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
+        /QuoteSignatureInvalid/
+      );
+    });
+
+    it("rejects expired RFQ quote", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 1002n;
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
+        oracleSigner,
+        {
+          pool: poolState,
+          user: user.publicKey,
+          direction: "sell",
+          inputAmount: 1_000n,
+          price: 100_000_000n,
+          expirySlot: BigInt(slot - 10), // already expired
+          nonce,
+        }
+      );
+      const [marker] = deriveQuoteNonceMarker(ctx.program.programId, poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(/QuoteExpired/);
+    });
+
     it("rejects replay (same nonce)", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
@@ -613,13 +1108,67 @@ describe("Protocol", () => {
           .rpc()
       ).rejects.toThrow();
     });
+
+    it("paused state blocks execute_swap + update_oracle (but not admin ops)", async () => {
+      // pause
+      await ctx.program.methods
+        .setPaused(true)
+        .accountsPartial({ admin: admin.publicKey, poolState })
+        .signers([admin])
+        .rpc();
+
+      // execute_swap is rejected
+      await expect(
+        ctx.program.methods
+          .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), null)
+          .accountsPartial({
+            user: user.publicKey,
+            poolState,
+            baseVault,
+            quoteVault,
+            userBaseAta,
+            userQuoteAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .signers([user])
+          .rpc()
+      ).rejects.toThrow(/PoolPaused/);
+
+      // update_oracle is rejected
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            new anchor.BN(100),
+            8
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/PoolPaused/);
+
+      // unpause (so later tests still work)
+      await ctx.program.methods
+        .setPaused(false)
+        .accountsPartial({ admin: admin.publicKey, poolState })
+        .signers([admin])
+        .rpc();
+    });
   });
 
   // ==========================================================================
   // rotate_oracle_signer
   // ==========================================================================
   describe("rotate_oracle_signer", () => {
-    it("admin rotates signer", async () => {
+    it("admin rotates signer + old signer immediately rejected", async () => {
       const newSigner = anchor.web3.Keypair.generate();
       await ctx.program.methods
         .rotateOracleSigner(newSigner.publicKey)
@@ -632,12 +1181,73 @@ describe("Protocol", () => {
         newSigner.publicKey.toString()
       );
 
+      // **Rotation effectiveness check**: update_oracle with the old signer must fail with UnauthorizedOracle.
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            new anchor.BN(50), // monotonic
+            8
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey, // old
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/UnauthorizedOracle/);
+
       // Restore (later tests still rely on oracleSigner).
       await ctx.program.methods
         .rotateOracleSigner(oracleSigner.publicKey)
         .accountsPartial({ admin: admin.publicKey, poolState })
         .signers([admin])
         .rpc();
+    });
+  });
+
+  // ==========================================================================
+  // rotate_admin
+  // ==========================================================================
+  describe("rotate_admin", () => {
+    it("admin rotates to new admin and back", async () => {
+      const newAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, newAdmin.publicKey, 5);
+
+      // 1) admin → newAdmin
+      await ctx.program.methods
+        .rotateAdmin(newAdmin.publicKey)
+        .accountsPartial({ admin: admin.publicKey, poolState })
+        .signers([admin])
+        .rpc();
+
+      let pool: any = await ctx.program.account.poolState.fetch(poolState);
+      expect(pool.admin.toString()).toBe(newAdmin.publicKey.toString());
+
+      // 2) newAdmin → admin (restore)
+      await ctx.program.methods
+        .rotateAdmin(admin.publicKey)
+        .accountsPartial({ admin: newAdmin.publicKey, poolState })
+        .signers([newAdmin])
+        .rpc();
+
+      pool = await ctx.program.account.poolState.fetch(poolState);
+      expect(pool.admin.toString()).toBe(admin.publicKey.toString());
+    });
+
+    it("rejects non-admin", async () => {
+      const fake = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, fake.publicKey, 1);
+      await expect(
+        ctx.program.methods
+          .rotateAdmin(fake.publicKey)
+          .accountsPartial({ admin: fake.publicKey, poolState })
+          .signers([fake])
+          .rpc()
+      ).rejects.toThrow();
     });
   });
 
@@ -696,6 +1306,57 @@ describe("Protocol", () => {
           .signers([fake])
           .rpc()
       ).rejects.toThrow();
+    });
+
+    it("withdraws quote only", async () => {
+      const vaultBefore = (await getAccount(ctx.provider.connection, quoteVault)).amount;
+      const withdrawAmt = 500n;
+      await ctx.program.methods
+        .adminWithdrawInventory(new anchor.BN(0), new anchor.BN(withdrawAmt.toString()))
+        .accountsPartial({
+          admin: admin.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          adminBaseAta,
+          adminQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([admin])
+        .rpc();
+      const vaultAfter = (await getAccount(ctx.provider.connection, quoteVault)).amount;
+      expect(vaultBefore - vaultAfter).toBe(withdrawAmt);
+    });
+
+    it("withdraws even when pool is paused (intended behavior)", async () => {
+      // pause
+      await ctx.program.methods
+        .setPaused(true)
+        .accountsPartial({ admin: admin.publicKey, poolState })
+        .signers([admin])
+        .rpc();
+
+      // admin_withdraw succeeds even when paused
+      await ctx.program.methods
+        .adminWithdrawInventory(new anchor.BN(100), new anchor.BN(0))
+        .accountsPartial({
+          admin: admin.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          adminBaseAta,
+          adminQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([admin])
+        .rpc();
+
+      // unpause (so later tests still work)
+      await ctx.program.methods
+        .setPaused(false)
+        .accountsPartial({ admin: admin.publicKey, poolState })
+        .signers([admin])
+        .rpc();
     });
   });
 

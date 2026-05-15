@@ -1,6 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::error::ErrorCode;
+use crate::events::PoolPausedChanged;
 use crate::state::PoolState;
 
 // docs/SPECIFICATION.md §3.4
@@ -18,5 +19,13 @@ pub struct SetPaused<'info> {
 
 pub fn process_set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
     ctx.accounts.pool_state.paused = paused;
+
+    emit!(PoolPausedChanged {
+        pool: ctx.accounts.pool_state.key(),
+        admin: ctx.accounts.admin.key(),
+        paused,
+        slot: Clock::get()?.slot,
+    });
+
     Ok(())
 }

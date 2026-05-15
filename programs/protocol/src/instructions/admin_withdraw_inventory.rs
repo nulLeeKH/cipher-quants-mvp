@@ -3,6 +3,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::InventoryWithdrawn;
 use crate::state::PoolState;
 
 // docs/SPECIFICATION.md §3.6
@@ -103,5 +104,13 @@ pub fn process_admin_withdraw_inventory(
     }
 
     // Phase 3: no separate state update — vault.amount is refreshed by the SPL Token CPI.
+    emit!(InventoryWithdrawn {
+        pool: ctx.accounts.pool_state.key(),
+        admin: ctx.accounts.admin.key(),
+        base_amount: withdraw_base_amount,
+        quote_amount: withdraw_quote_amount,
+        slot: Clock::get()?.slot,
+    });
+
     Ok(())
 }

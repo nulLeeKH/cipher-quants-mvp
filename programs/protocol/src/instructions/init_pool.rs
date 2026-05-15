@@ -3,6 +3,7 @@ use anchor_spl::token::{Mint, Token, TokenAccount};
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::PoolInitialized;
 use crate::state::{DepthParams, PoolState, SkewParams};
 
 // docs/SPECIFICATION.md §3.1
@@ -94,7 +95,8 @@ pub fn process_init_pool(
     pool.spread_bps = initial_spread_bps;
     pool.depth_curve_params = initial_depth_params;
     pool.inventory_skew_params = initial_skew_params;
-    pool.last_oracle_update_slot = Clock::get()?.slot;
+    let slot = Clock::get()?.slot;
+    pool.last_oracle_update_slot = slot;
     pool.oracle_nonce = 0;
     pool.current_mode_ttl = initial_mode_ttl;
     pool.bump = ctx.bumps.pool_state;
@@ -102,6 +104,18 @@ pub fn process_init_pool(
     pool.quote_vault_bump = ctx.bumps.quote_vault;
     pool.paused = false;
     pool._reserved = [0; 64];
+
+    emit!(PoolInitialized {
+        pool: pool.key(),
+        admin: pool.admin,
+        oracle_signer: pool.authorized_oracle_signer,
+        base_mint: pool.base_mint,
+        quote_mint: pool.quote_mint,
+        initial_fair_value,
+        initial_spread_bps,
+        initial_mode_ttl,
+        slot,
+    });
 
     Ok(())
 }

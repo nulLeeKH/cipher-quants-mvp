@@ -1,5 +1,6 @@
 pub mod constants;
 pub mod error;
+pub mod events;
 pub mod instructions;
 pub mod math;
 pub mod state;
@@ -7,6 +8,7 @@ pub mod state;
 use anchor_lang::prelude::*;
 
 pub use constants::*;
+pub use events::*;
 use instructions::*;
 pub use math::*;
 pub use state::*;
@@ -73,6 +75,11 @@ pub mod protocol {
             ctx,
             new_authorized_oracle_signer,
         )
+    }
+
+    /// docs/SPECIFICATION.md §3.7
+    pub fn rotate_admin(ctx: Context<RotateAdmin>, new_admin: Pubkey) -> Result<()> {
+        instructions::rotate_admin::process_rotate_admin(ctx, new_admin)
     }
 
     /// docs/SPECIFICATION.md §3.6

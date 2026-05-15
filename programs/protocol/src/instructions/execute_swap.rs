@@ -5,6 +5,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::*;
 use crate::error::ErrorCode;
+use crate::events::SwapExecuted;
 use crate::math::{curve, mul_div_floor, verify_signed_quote_signature};
 use crate::state::{PoolState, QuoteNonceMarker, Side, SignedQuote};
 
@@ -70,6 +71,8 @@ pub fn process_execute_swap<'info>(
         pool.current_mode_ttl > 0 && curve_age <= pool.current_mode_ttl as u64;
 
     // Decision policy §3.1: curve-first. When the curve is fresh, ignore signed_quote_opt.
+    let mut mode: u8 = 0; // 0=curve, 1=rfq (for the emitted event)
+    let mut quote_nonce: u64 = 0; // 0 on the curve path
     let execution_price: u64 = if curve_fresh {
         curve::evaluate(
             pool.fair_value,
@@ -82,6 +85,7 @@ pub fn process_execute_swap<'info>(
             direction,
         )?
     } else {
+        mode = 1;
         let sq = signed_quote_opt
             .as_ref()
             .ok_or(error!(ErrorCode::NoFreshPriceSource))?;
@@ -121,6 +125,7 @@ pub fn process_execute_swap<'info>(
             sq.expiry_slot,
         )?;
 
+        quote_nonce = sq.nonce;
         sq.price
     };
 
@@ -203,6 +208,21 @@ pub fn process_execute_swap<'info>(
     }
 
     // Phase 3: No separate state update — vault.amount is refreshed by the SPL Token CPI.
+    emit!(SwapExecuted {
+        pool: ctx.accounts.pool_state.key(),
+        user: ctx.accounts.user.key(),
+        direction: match direction {
+            Side::Buy => 0,
+            Side::Sell => 1,
+        },
+        mode,
+        input_amount,
+        output_amount,
+        execution_price,
+        quote_nonce,
+        slot: now,
+    });
+
     Ok(())
 }
 
