@@ -1,0 +1,40 @@
+{
+  "name": "solana-ai-boilerplate",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "build:mainnet": "./scripts/build.sh mainnet",
+    "build:devnet": "./scripts/build.sh devnet",
+    "build:localnet": "./scripts/build.sh localnet",
+    "test": "anchor test",
+    "sdk:build": "pnpm --filter @solana-boilerplate/sdk build",
+    "sdk:dev": "pnpm --filter @solana-boilerplate/sdk dev",
+    "app:build": "pnpm --filter @solana-boilerplate/app build",
+    "app:dev": "pnpm --filter @solana-boilerplate/app dev",
+    "keeper:dev": "cd keeper && deno task dev"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@solana/spl-token": "0.4.14"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.0",
+    "@types/jest": "^29.0.3",
+    "jest": "^29.0.3",
+    "prettier": "^2.6.2",
+    "ts-jest": "^29.0.2",
+    "typescript": "^5.7.3"
+  },
+  "jest": {
+    "testTimeout": 180000
+  },
+  "pnpm": {
+    "neverBuiltDependencies": ["@stellar/stellar-sdk"]
+  }
+}
