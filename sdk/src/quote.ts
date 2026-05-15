@@ -47,15 +47,16 @@ export interface SignedQuoteMessage {
 
 export function serializeSignedQuoteMessage(
   msg: SignedQuoteMessage
-): Buffer {
-  const buf = Buffer.alloc(97);
-  msg.pool.toBuffer().copy(buf, 0);
-  msg.user.toBuffer().copy(buf, 32);
+): Uint8Array {
+  const buf = new Uint8Array(97);
+  buf.set(msg.pool.toBuffer(), 0); // 32
+  buf.set(msg.user.toBuffer(), 32); // 32
   buf[64] = msg.direction === "buy" ? SIDE_BUY_TAG : SIDE_SELL_TAG;
-  buf.writeBigUInt64LE(msg.inputAmount, 65);
-  buf.writeBigUInt64LE(msg.price, 73);
-  buf.writeBigUInt64LE(msg.expirySlot, 81);
-  buf.writeBigUInt64LE(msg.nonce, 89);
+  const view = new DataView(buf.buffer);
+  view.setBigUint64(65, msg.inputAmount, true); // little-endian
+  view.setBigUint64(73, msg.price, true);
+  view.setBigUint64(81, msg.expirySlot, true);
+  view.setBigUint64(89, msg.nonce, true);
   return buf;
 }
 
@@ -77,7 +78,7 @@ export function buildSignedQuoteWithVerifyIx(
 ): {
   signedQuote: SignedQuoteArg;
   verifyIx: TransactionInstruction;
-  messageBytes: Buffer;
+  messageBytes: Uint8Array;
 } {
   const messageBytes = serializeSignedQuoteMessage(msg);
 
@@ -89,8 +90,17 @@ export function buildSignedQuoteWithVerifyIx(
 
   // verify ix data layout: [header(16) ... payload(pubkey+sig+msg)].
   // signature_offset is at bytes [2..4) as a u16 LE; extract the 64-byte signature.
-  const sigOffset = verifyIx.data.readUInt16LE(2);
-  const signature = verifyIx.data.subarray(sigOffset, sigOffset + 64);
+  // Handles both Buffer and Uint8Array via DataView so we stay cross-runtime safe.
+  const dataU8: Uint8Array =
+    verifyIx.data instanceof Uint8Array
+      ? verifyIx.data
+      : new Uint8Array(verifyIx.data as ArrayBuffer);
+  const sigOffset = new DataView(
+    dataU8.buffer,
+    dataU8.byteOffset,
+    dataU8.byteLength
+  ).getUint16(2, true);
+  const signature = dataU8.subarray(sigOffset, sigOffset + 64);
   if (signature.length !== 64) {
     throw new Error(
       `expected 64-byte signature, got ${signature.length}`
@@ -108,7 +118,7 @@ export function buildSignedQuoteWithVerifyIx(
     signature: Array.from(signature),
   };
 
-  return { signedQuote, verifyIx, messageBytes: Buffer.from(messageBytes) };
+  return { signedQuote, verifyIx, messageBytes };
 }
 
 // ============================================================================

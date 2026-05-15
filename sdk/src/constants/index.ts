@@ -6,9 +6,9 @@
 // ============================================================================
 
 // ----- PDA Seeds -----
-export const POOL_SEED = new TextEncoder().encode("pool");
-export const VAULT_SEED = new TextEncoder().encode("vault");
-export const QUOTE_USED_SEED = new TextEncoder().encode("quote_used");
+export const POOL_SEED: Uint8Array = new TextEncoder().encode("pool");
+export const VAULT_SEED: Uint8Array = new TextEncoder().encode("vault");
+export const QUOTE_USED_SEED: Uint8Array = new TextEncoder().encode("quote_used");
 
 // ----- Protocol Constants -----
 /** TTL hard cap (code-level). Recommended operating values: Mode A=1, B=3, C=0. */

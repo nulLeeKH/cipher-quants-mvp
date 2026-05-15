@@ -1,56 +1,113 @@
-# Keeper Bot
+# Keeper — Oracle Pusher
 
-Off-chain automation service for the Solana protocol. Built with Deno for easy deployment as a standalone binary.
+Off-chain oracle worker for the Cipher Quants Program. **While Mode A/B is
+active**, it pushes `update_oracle` in real time to keep the curve fresh.
 
-## What is a Keeper?
+## Responsibilities (Keeper *only*)
 
-A keeper bot is an off-chain service that monitors on-chain state and submits transactions when certain conditions are met. Common use cases:
+- **Oracle write** — push `update_oracle` every ~200ms in Mode A, threshold-triggered in Mode B.
+- **Price-source integration** — synthesize fair_value from Finnhub / Pyth / CEX feeds (PoC currently ships MockPriceSource).
+- **Automatic mode switching** — RV/NBBO-driven A/B/C decisions with hysteresis.
+- **Single-writer nonce** — in-memory monotonic counter (seeded from the on-chain nonce on boot).
 
-- **Cranking**: Calling permissionless instructions on a schedule (e.g., updating oracle prices, settling expired positions)
-- **Liquidation**: Monitoring under-collateralized positions and triggering liquidations
-- **Arbitrage**: Detecting price discrepancies and executing trades
-- **Indexing**: Watching on-chain events for off-chain dashboards
+## The RFQ webhook lives elsewhere (`api/`)
+
+> The RFQ webhook is 24/7 (especially during Mode C). The keeper does
+> oracle write only. The [api/](../api/) Deno HTTP server is responsible for
+> quote responses. Both currently share the oracle hot key (or can be split
+> into a dedicated `quote_signer` key).
 
 ## Quick Start
 
 ```bash
-# Development
 cd keeper
-deno task dev
+cp .env.example .env  # fill in RPC_URL, wallet paths, BASE_MINT, QUOTE_MINT
 
-# Start service
-RPC_URL=https://api.devnet.solana.com deno task start
+# Initialize the pool (one-shot)
+deno task init-pool
 
-# Compile to standalone binary
-deno task compile
-./keeper-bot start
+# Start the oracle worker (Mode A/B active)
+deno task oracle
+
+# Inspect pool state
+deno task status
 ```
+
+## Subcommands
+
+| Command | Purpose |
+|---|---|
+| `init-pool`             | One-shot admin op — calls the `init_pool` instruction. Requires BASE_MINT / QUOTE_MINT.                  |
+| `status`                | Inspect pool / vault / freshness.                                                                        |
+| `oracle` (= `start`)    | Run the oracle worker loop (Mode A/B/C auto-switching).                                                  |
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `RPC_URL` | Yes | — | Solana RPC endpoint |
-| `WALLET_PATH` | No | `~/.config/solana/id.json` | Path to wallet JSON |
-| `VERBOSE` | No | `false` | Enable verbose logging |
+See [.env.example](.env.example). Key entries:
 
-## Project Structure
+| Variable | Required | Description |
+|---|---|---|
+| `RPC_URL` | ✓ | Solana RPC endpoint |
+| `ORACLE_WALLET_PATH` | ✓ | Oracle hot key (Ed25519 keypair JSON, 64-byte secret array) |
+| `ADMIN_WALLET_PATH` | for init-pool | Admin key |
+| `BASE_MINT`, `QUOTE_MINT`             | ✓               | Pool pair                                                                |
+| `ORACLE_MODE_A_PUSH_INTERVAL_MS`      | default 200     | Mode A push interval                                                     |
+| `ORACLE_MODE_B_EVAL_INTERVAL_MS`      | default 1000    | Mode B threshold-evaluation interval                                     |
+
+## Architecture
 
 ```
-keeper/
-├── src/
-│   ├── main.ts      # CLI entry point (argument parsing, command routing)
-│   ├── config.ts     # Environment variable loading and validation
-│   └── service.ts    # Main service loop (your keeper logic goes here)
-├── deno.json         # Deno configuration and dependencies
-└── README.md
+keeper/src/
+├── main.ts           # CLI entry (init-pool / status / oracle)
+├── config.ts         # env loading
+├── wallet.ts         # KeypairProvider (PoC: JsonFile; future: Turnkey/KMS)
+├── connection.ts     # RpcAdapter abstraction
+├── program.ts        # Anchor Provider + SDK Program
+├── service.ts        # legacy boilerplate placeholder (unused)
+├── sources/          # PriceSource interface + Mock impl
+│   ├── types.ts
+│   ├── mock.ts       # Random walk + spike
+│   └── index.ts
+├── oracle/           # Oracle worker
+│   ├── state.ts      # OracleSharedState (mode, nonce, latest tick)
+│   ├── mode.ts       # Mode decision (RV/NBBO + hysteresis)
+│   ├── worker.ts     # Push loop
+│   └── index.ts
+└── commands/         # CLI subcommands
+    ├── init_pool.ts
+    ├── status.ts
+    └── oracle.ts
 ```
 
-## Implementing Your Keeper
+## Mode decisions (current v0)
 
-1. **Define what to watch**: Edit `service.ts` to fetch the on-chain state you care about
-2. **Define when to act**: Add conditions that trigger transactions
-3. **Submit transactions**: Use the SDK's instruction builders to create and send transactions
-4. **Handle errors**: Implement retry logic with exponential backoff for transient RPC errors
+| Mode  | TTL                  | Push                       | When                                                       |
+|---|---|---|---|
+| **A** | 1 slot               | every 200ms                | High vol (RV > 150 bps OR NBBO 30s move > 15 bps)          |
+| **B** | 3 slots              | threshold-triggered only   | Normal trading                                              |
+| **C** | 0 (forced stale)     | no push (sleep)            | Market closed / low-vol                                     |
 
-The keeper uses the SDK (`@solana-boilerplate/sdk`) for all on-chain interactions, ensuring consistency with the frontend and tests.
+Downgrades fire when the quiet-duration condition holds (B→C: 90s, A→B:
+180s). Cool-down: at least 30 seconds in the current mode before evaluating a
+downgrade. See [docs/OPERATIONS.md §1.1](../docs/OPERATIONS.md) for the full
+policy.
+
+## Data sources
+
+The PoC uses [MockPriceSource](src/sources/mock.ts) — random walk + spike.
+Wire up Finnhub / Pyth adapters right before Stage 1 entry
+([TODO.md §1](../TODO.md)).
+
+## Build / Compile
+
+```bash
+deno task check                # Type-check
+deno task compile              # Standalone binary: ./keeper-bot
+```
+
+## Related
+
+- [api/](../api/) — RFQ webhook (24/7)
+- [sdk/](../sdk/) — TypeScript SDK (shared)
+- [programs/protocol/](../programs/protocol/) — on-chain program
+- [docs/OPERATIONS.md](../docs/OPERATIONS.md) — full operational spec
