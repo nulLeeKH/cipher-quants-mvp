@@ -77,9 +77,29 @@ pub mod protocol {
         )
     }
 
-    /// docs/SPECIFICATION.md §3.7
+    /// docs/SPECIFICATION.md §3.7 — single-step rotation (deprecated, retained
+    /// for backward compatibility / emergency recovery). Prefer the 2-step
+    /// `propose_admin` + `accept_admin` flow.
     pub fn rotate_admin(ctx: Context<RotateAdmin>, new_admin: Pubkey) -> Result<()> {
         instructions::rotate_admin::process_rotate_admin(ctx, new_admin)
+    }
+
+    /// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 1: current admin
+    /// publishes a candidate. Creates the per-pool `admin_proposal` PDA.
+    pub fn propose_admin(ctx: Context<ProposeAdmin>, new_admin: Pubkey) -> Result<()> {
+        instructions::propose_admin::process_propose_admin(ctx, new_admin)
+    }
+
+    /// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 2: candidate signs
+    /// to take over. Atomically swaps `pool_state.admin` and closes the
+    /// proposal account.
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        instructions::accept_admin::process_accept_admin(ctx)
+    }
+
+    /// docs/SPECIFICATION.md §3.7 — withdraw a pending proposal (current admin).
+    pub fn cancel_admin_proposal(ctx: Context<CancelAdminProposal>) -> Result<()> {
+        instructions::cancel_admin_proposal::process_cancel_admin_proposal(ctx)
     }
 
     /// docs/SPECIFICATION.md §3.6

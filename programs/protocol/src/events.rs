@@ -92,3 +92,19 @@ pub struct QuoteMarkerClosed {
     pub expiry_slot: u64,
     pub slot: u64,
 }
+
+#[event]
+pub struct AdminProposalCreated {
+    pub pool: Pubkey,
+    pub proposed_by: Pubkey,
+    pub new_admin: Pubkey,
+    pub slot: u64,
+}
+
+#[event]
+pub struct AdminProposalCancelled {
+    pub pool: Pubkey,
+    pub admin: Pubkey,
+    pub cancelled_new_admin: Pubkey,
+    pub slot: u64,
+}

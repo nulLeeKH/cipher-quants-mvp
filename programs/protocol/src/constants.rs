@@ -14,6 +14,9 @@ pub const VAULT_SEED: &[u8] = b"vault";
 #[constant]
 pub const QUOTE_USED_SEED: &[u8] = b"quote_used";
 
+#[constant]
+pub const ADMIN_PROPOSAL_SEED: &[u8] = b"admin_proposal";
+
 // ============================================================================
 // Protocol Constants
 // ============================================================================

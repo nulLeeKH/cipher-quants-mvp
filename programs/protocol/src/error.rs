@@ -54,6 +54,12 @@ pub enum ErrorCode {
     #[msg("authorized_oracle_signer must not be the default Pubkey.")]
     InvalidOracleSignerKey,
 
+    #[msg("new_admin must not be zero or equal to the current admin.")]
+    InvalidNewAdmin,
+
+    #[msg("Admin-rotation proposal is stale: pool admin changed since it was created.")]
+    ProposalStale,
+
     // ----- 62xx authorization & state -----
     #[msg("Unauthorized oracle signer.")]
     UnauthorizedOracle = 6200,

@@ -1478,4 +1478,394 @@ describe("Protocol", () => {
       ).rejects.toThrow(/NonceNotYetClosable/);
     });
   });
+
+  // ==========================================================================
+  // Error-code negative tests
+  // ==========================================================================
+  // One test per ErrorCode that is reachable through an instruction call but
+  // was previously untested. Goal: every error in error.rs is exercised at
+  // least once so the validation paths can't silently regress.
+  describe("error code coverage (negative tests)", () => {
+    // ---------------------------------------------------------------------
+    // 6102 InvalidTtl
+    // ---------------------------------------------------------------------
+    it("update_oracle rejects ttl > MAX_TTL_SLOTS (InvalidTtl)", async () => {
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            new anchor.BN(99_001),
+            9 // MAX_TTL_SLOTS=8
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/InvalidTtl/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6106 InvalidDepthParams
+    // ---------------------------------------------------------------------
+    it("update_oracle rejects depth.max_depth_bps > MAX_DEPTH_BPS (InvalidDepthParams)", async () => {
+      const badDepth = {
+        depthCoefBps: 2,
+        sizeUnit: new anchor.BN(1_000_000),
+        maxDepthBps: 501, // MAX_DEPTH_BPS=500
+        reserved: Array(6).fill(0),
+      };
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            badDepth,
+            defaultSkewParams(),
+            new anchor.BN(99_010),
+            TTL_MODE_B
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/InvalidDepthParams/);
+    });
+
+    it("update_oracle rejects depth.size_unit == 0 (InvalidDepthParams)", async () => {
+      const badDepth = {
+        depthCoefBps: 2,
+        sizeUnit: new anchor.BN(0),
+        maxDepthBps: 100,
+        reserved: Array(6).fill(0),
+      };
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            badDepth,
+            defaultSkewParams(),
+            new anchor.BN(99_011),
+            TTL_MODE_B
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/InvalidDepthParams/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6107 InvalidSkewParams
+    // ---------------------------------------------------------------------
+    it("update_oracle rejects skew.max_skew_offset_bps > MAX_SKEW_OFFSET_BPS (InvalidSkewParams)", async () => {
+      const badSkew = {
+        targetBaseBps: 5_000,
+        skewCoefBps: 50,
+        maxSkewOffsetBps: 501, // MAX_SKEW_OFFSET_BPS=500
+        reserved: Array(10).fill(0),
+      };
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            badSkew,
+            new anchor.BN(99_020),
+            TTL_MODE_B
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/InvalidSkewParams/);
+    });
+
+    it("update_oracle rejects target_base_bps > 10_000 (InvalidSkewParams)", async () => {
+      const badSkew = {
+        targetBaseBps: 10_001, // > BPS_DENOMINATOR
+        skewCoefBps: 50,
+        maxSkewOffsetBps: 100,
+        reserved: Array(10).fill(0),
+      };
+      await expect(
+        ctx.program.methods
+          .updateOracle(
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            badSkew,
+            new anchor.BN(99_021),
+            TTL_MODE_B
+          )
+          .accountsPartial({
+            oracleSigner: oracleSigner.publicKey,
+            poolState,
+          })
+          .signers([oracleSigner])
+          .rpc()
+      ).rejects.toThrow(/InvalidSkewParams/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6108 InvalidOracleSignerKey — init_pool with zero pubkey
+    // ---------------------------------------------------------------------
+    it("init_pool rejects zero authorized_oracle_signer (InvalidOracleSignerKey)", async () => {
+      const tmpAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, tmpAdmin.publicKey, 5);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      const [tmpPool] = derivePoolState(b, q);
+      const [tmpBv] = deriveVault(tmpPool, b);
+      const [tmpQv] = deriveVault(tmpPool, q);
+
+      await expect(
+        ctx.program.methods
+          .initPool(
+            anchor.web3.PublicKey.default, // zero pubkey
+            FAIR,
+            SPREAD_BPS,
+            defaultDepthParams(),
+            defaultSkewParams(),
+            0
+          )
+          .accountsPartial({
+            admin: tmpAdmin.publicKey,
+            poolState: tmpPool,
+            baseMint: b,
+            quoteMint: q,
+            baseVault: tmpBv,
+            quoteVault: tmpQv,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: anchor.web3.SystemProgram.programId,
+            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          })
+          .signers([tmpAdmin])
+          .rpc()
+      ).rejects.toThrow(/InvalidOracleSignerKey/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6302 QuoteWrongPool — sign for a different pool
+    // ---------------------------------------------------------------------
+    it("execute_swap rejects quote signed for a different pool (QuoteWrongPool)", async () => {
+      // Force the curve stale for this describe block (last block above set
+      // ttl=0 already, but be defensive — re-push with TTL=0).
+      await ctx.program.methods
+        .updateOracle(
+          FAIR,
+          SPREAD_BPS,
+          defaultDepthParams(),
+          defaultSkewParams(),
+          new anchor.BN(99_100),
+          0 // Mode C
+        )
+        .accountsPartial({
+          oracleSigner: oracleSigner.publicKey,
+          poolState,
+        })
+        .signers([oracleSigner])
+        .rpc();
+
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 90_302n;
+      const fakePool = anchor.web3.Keypair.generate().publicKey;
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+        pool: fakePool, // wrong pool
+        user: user.publicKey,
+        direction: "sell",
+        inputAmount: 1_000n,
+        price: 100_000_000n,
+        expirySlot: BigInt(slot + 200),
+        nonce,
+      });
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(
+        ctx.provider.sendAndConfirm(tx, [user])
+      ).rejects.toThrow(/QuoteWrongPool/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6305 QuoteSizeMismatch
+    // ---------------------------------------------------------------------
+    it("execute_swap rejects quote.input_amount != instruction input_amount (QuoteSizeMismatch)", async () => {
+      const slot = await ctx.provider.connection.getSlot();
+      const nonce = 90_305n;
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+        pool: poolState,
+        user: user.publicKey,
+        direction: "sell",
+        inputAmount: 2_000n, // quote says 2000
+        price: 100_000_000n,
+        expirySlot: BigInt(slot + 200),
+        nonce,
+      });
+      const [marker] = deriveQuoteNonceMarker(poolState, nonce);
+      const swapIx = await ctx.program.methods
+        .executeSwap(
+          new anchor.BN(1_000), // but instruction passes 1000
+          { sell: {} },
+          new anchor.BN(0),
+          signedQuote
+        )
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
+        /QuoteSizeMismatch/
+      );
+    });
+
+    // ---------------------------------------------------------------------
+    // 6307 QuoteAlreadyUsed — replay returns specific error
+    // ---------------------------------------------------------------------
+    it("execute_swap with a previously-used nonce errors QuoteAlreadyUsed", async () => {
+      // Reuse nonce 1n which was consumed by the "Sell via signed quote" test.
+      const slot = await ctx.provider.connection.getSlot();
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+        pool: poolState,
+        user: user.publicKey,
+        direction: "sell",
+        inputAmount: 1_000n,
+        price: 100_000_000n,
+        expirySlot: BigInt(slot + 200),
+        nonce: 1n,
+      });
+      const [marker] = deriveQuoteNonceMarker(poolState, 1n);
+      const swapIx = await ctx.program.methods
+        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .accountsPartial({
+          user: user.publicKey,
+          poolState,
+          baseVault,
+          quoteVault,
+          userBaseAta,
+          userQuoteAta,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        })
+        .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
+        .instruction();
+      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
+        /QuoteAlreadyUsed/
+      );
+    });
+
+    // ---------------------------------------------------------------------
+    // 6401 InsufficientReserves — drain the vault, then try to swap
+    // ---------------------------------------------------------------------
+    it("admin_withdraw_inventory rejects withdraw > vault balance (InsufficientReserves)", async () => {
+      const vaultAmt = (
+        await getAccount(ctx.provider.connection, baseVault)
+      ).amount;
+      await expect(
+        ctx.program.methods
+          .adminWithdrawInventory(new anchor.BN((vaultAmt + 1n).toString()), new anchor.BN(0))
+          .accountsPartial({
+            admin: admin.publicKey,
+            poolState,
+            baseVault,
+            quoteVault,
+            adminBaseAta,
+            adminQuoteAta,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([admin])
+          .rpc()
+      ).rejects.toThrow(/InsufficientReserves/);
+    });
+
+    // ---------------------------------------------------------------------
+    // 6500 WrongPool — close_expired_nonce with mismatched pool_state
+    // ---------------------------------------------------------------------
+    it("close_expired_nonce rejects when pool_state does not match marker.pool (WrongPool)", async () => {
+      // Build a second pool to use as the wrong pool_state.
+      const otherAdmin = anchor.web3.Keypair.generate();
+      await fundAccount(ctx.provider, otherAdmin.publicKey, 5);
+      const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
+      const [b, q] = sortMints(mintA, mintB);
+      const [otherPool] = derivePoolState(b, q);
+      const [otherBv] = deriveVault(otherPool, b);
+      const [otherQv] = deriveVault(otherPool, q);
+      await ctx.program.methods
+        .initPool(
+          oracleSigner.publicKey,
+          FAIR,
+          SPREAD_BPS,
+          defaultDepthParams(),
+          defaultSkewParams(),
+          0
+        )
+        .accountsPartial({
+          admin: otherAdmin.publicKey,
+          poolState: otherPool,
+          baseMint: b,
+          quoteMint: q,
+          baseVault: otherBv,
+          quoteVault: otherQv,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: anchor.web3.SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+        })
+        .signers([otherAdmin])
+        .rpc();
+
+      // Pass a marker from the main pool but reference the *other* pool.
+      const [marker] = deriveQuoteNonceMarker(poolState, 1n); // exists from RFQ test
+      await expect(
+        ctx.program.methods
+          .closeExpiredNonce()
+          .accountsPartial({
+            closer: admin.publicKey,
+            poolState: otherPool, // mismatched
+            quoteNonceMarker: marker,
+          })
+          .signers([admin])
+          .rpc()
+      ).rejects.toThrow(/WrongPool/);
+    });
+  });
 });

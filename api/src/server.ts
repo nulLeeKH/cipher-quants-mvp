@@ -211,6 +211,52 @@ export async function startApiServer(
 
   const metrics = newMetrics();
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Per-IP rate limiter (sliding window, in-memory).
+  // ──────────────────────────────────────────────────────────────────────
+  // Protects the RPC backend from a single client hammering /quote (which
+  // calls fetchPoolState + fetchVaultBalances). At Stage 2 swap to Redis or
+  // an upstream limit at the reverse proxy.
+  //
+  // Window = 1s. Default cap = 30 req/s per IP for /quote, 60 for everything
+  // else. Both are env-tunable.
+  const RATE_WINDOW_MS = 1_000;
+  const RATE_LIMIT_QUOTE = Number(Deno.env.get("RATE_LIMIT_QUOTE_PER_SEC") ?? "30");
+  const RATE_LIMIT_DEFAULT = Number(Deno.env.get("RATE_LIMIT_DEFAULT_PER_SEC") ?? "60");
+  interface RateState { hits: number[]; }
+  const rateBuckets = new Map<string, RateState>();
+  function getClientKey(c: { req: { header(name: string): string | undefined } }): string {
+    return (
+      c.req.header("x-forwarded-for")?.split(",")[0].trim() ||
+      c.req.header("x-real-ip") ||
+      "unknown"
+    );
+  }
+  function isLimited(key: string, limit: number): boolean {
+    const now = Date.now();
+    const state = rateBuckets.get(key) ?? { hits: [] };
+    // Drop stale hits (sliding window)
+    while (state.hits.length > 0 && state.hits[0] < now - RATE_WINDOW_MS) {
+      state.hits.shift();
+    }
+    if (state.hits.length >= limit) {
+      rateBuckets.set(key, state);
+      return true;
+    }
+    state.hits.push(now);
+    rateBuckets.set(key, state);
+    return false;
+  }
+  // Periodic cleanup so the Map doesn't grow unbounded with one-shot IPs.
+  const rateSweep = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of rateBuckets) {
+      const fresh = v.hits.filter((t) => t >= now - RATE_WINDOW_MS);
+      if (fresh.length === 0) rateBuckets.delete(k);
+      else rateBuckets.set(k, { hits: fresh });
+    }
+  }, 60_000);
+
   // Nonce generation: 8-byte crypto random. Date.now+Math.random can collide
   // within the same millisecond, which would cause legitimate quotes to be
   // rejected by the PDA seed marker; the low entropy is also attacker-
@@ -223,6 +269,22 @@ export async function startApiServer(
   }
 
   const app = new Hono();
+
+  // Rate-limit middleware. /health is exempt (so external healthcheckers don't
+  // get throttled). /metrics is already auth-gated.
+  app.use("*", async (c, next) => {
+    const path = new URL(c.req.url).pathname;
+    if (path === "/health" || path === "/metrics") return next();
+    const limit = path === "/quote" ? RATE_LIMIT_QUOTE : RATE_LIMIT_DEFAULT;
+    if (isLimited(getClientKey(c), limit)) {
+      return c.json(
+        { error: "Too Many Requests", limit, windowMs: RATE_WINDOW_MS },
+        429,
+        { "Retry-After": "1" }
+      );
+    }
+    return next();
+  });
 
   app.get("/health", (c) => c.text("ok"));
 
@@ -445,6 +507,7 @@ export async function startApiServer(
   return {
     async stop() {
       clearInterval(cacheSweep);
+      clearInterval(rateSweep);
       await server.shutdown();
     },
   };

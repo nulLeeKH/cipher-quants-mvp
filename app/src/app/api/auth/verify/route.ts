@@ -145,16 +145,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Unknown kind" }, { status: 400 });
   }
 
-  // 4) Optional admin check
+  // 4) Optional admin check — bounded by a hard timeout so a hung RPC cannot
+  // make auth itself hang. 10s aligns with typical edge/CDN limits.
   let poolAddr: PublicKey | undefined;
   if (body.baseMint && body.quoteMint) {
+    const RPC_TIMEOUT_MS = 10_000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
     try {
       const baseMint = new PublicKey(body.baseMint);
       const quoteMint = new PublicKey(body.quoteMint);
       const [addr] = derivePoolState(baseMint, quoteMint, PROGRAM_ID);
       poolAddr = addr;
 
-      const connection = new Connection(RPC_URL, "confirmed");
+      const connection = new Connection(RPC_URL, {
+        commitment: "confirmed",
+        fetch: (input, init) =>
+          fetch(input, { ...init, signal: controller.signal }),
+      });
       const readonlyWallet = {
         publicKey: PublicKey.default,
         signTransaction: async () => {
@@ -177,10 +185,22 @@ export async function POST(req: Request) {
         );
       }
     } catch (e: any) {
+      const isAbort =
+        e?.name === "AbortError" ||
+        controller.signal.aborted ||
+        /aborted|timeout|timed out/i.test(e?.message ?? "");
+      if (isAbort) {
+        return NextResponse.json(
+          { error: "RPC timeout while verifying pool admin" },
+          { status: 504 }
+        );
+      }
       return NextResponse.json(
         { error: `Pool admin check failed: ${e.message}` },
         { status: 500 }
       );
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

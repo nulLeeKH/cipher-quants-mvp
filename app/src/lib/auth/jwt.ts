@@ -5,13 +5,22 @@
 // JWT_SECRET MUST be provided via env (>= 16 chars). We fail fast on misuse
 // rather than fall back to a public default — a leaked default secret means
 // anyone can mint a valid admin session.
+//
+// Validation strategy:
+//   - In production (`NODE_ENV === "production"`), the secret is validated at
+//     module load (eager fail-fast → container exits at boot, not on first
+//     auth request).
+//   - In dev/test, validation is lazy so unrelated tooling (e.g. typecheck,
+//     contributors without admin features wired up) doesn't trip over a
+//     missing secret.
+//   - Callers that need an explicit "verify before serving" check can call
+//     `assertJwtSecretValid()` (e.g. from middleware or a healthcheck).
 
 import { SignJWT, jwtVerify, type JWTPayload } from "jose";
 
 let cachedSecret: Uint8Array | null = null;
 
-function getSecret(): Uint8Array {
-  if (cachedSecret) return cachedSecret;
+function loadAndValidateSecret(): Uint8Array {
   const raw = process.env.JWT_SECRET;
   if (!raw || raw.length < 16) {
     throw new Error(
@@ -19,8 +28,28 @@ function getSecret(): Uint8Array {
         "Set it in app/.env.local before starting the server."
     );
   }
-  cachedSecret = new TextEncoder().encode(raw);
+  return new TextEncoder().encode(raw);
+}
+
+/**
+ * Explicit assertion entry point. Call this from middleware / startup-side
+ * code to fail fast outside of a request handler.
+ */
+export function assertJwtSecretValid(): void {
+  if (cachedSecret) return;
+  cachedSecret = loadAndValidateSecret();
+}
+
+function getSecret(): Uint8Array {
+  if (cachedSecret) return cachedSecret;
+  cachedSecret = loadAndValidateSecret();
   return cachedSecret;
+}
+
+// Production eager-validate: surfaces missing/short JWT_SECRET at container
+// boot rather than on the first authenticated request.
+if (process.env.NODE_ENV === "production") {
+  assertJwtSecretValid();
 }
 
 const CHALLENGE_EXP_MIN = Number(process.env.ADMIN_CHALLENGE_EXP_MIN ?? "5");

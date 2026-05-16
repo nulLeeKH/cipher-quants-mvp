@@ -14,6 +14,72 @@ export type Protocol = {
   },
   "instructions": [
     {
+      "name": "acceptAdmin",
+      "docs": [
+        "docs/SPECIFICATION.md §3.7 — 2-step rotation, step 2: candidate signs",
+        "to take over. Atomically swaps `pool_state.admin` and closes the",
+        "proposal account."
+      ],
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "newAdmin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "poolState",
+          "writable": true
+        },
+        {
+          "name": "adminProposal",
+          "docs": [
+            "Proposal must (a) exist for this pool, (b) name `new_admin` as the",
+            "candidate, and (c) target the current pool admin so a stale proposal",
+            "from a previous admin can't be replayed across rotations."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "poolState"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "adminWithdrawInventory",
       "docs": [
         "docs/SPECIFICATION.md §3.6"
@@ -76,6 +142,67 @@ export type Protocol = {
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "cancelAdminProposal",
+      "docs": [
+        "docs/SPECIFICATION.md §3.7 — withdraw a pending proposal (current admin)."
+      ],
+      "discriminator": [
+        68,
+        6,
+        145,
+        131,
+        16,
+        73,
+        182,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "poolState"
+          ]
+        },
+        {
+          "name": "poolState"
+        },
+        {
+          "name": "adminProposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "poolState"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
     },
     {
       "name": "closeExpiredNonce",
@@ -390,9 +517,87 @@ export type Protocol = {
       ]
     },
     {
+      "name": "proposeAdmin",
+      "docs": [
+        "docs/SPECIFICATION.md §3.7 — 2-step rotation, step 1: current admin",
+        "publishes a candidate. Creates the per-pool `admin_proposal` PDA."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "poolState"
+          ]
+        },
+        {
+          "name": "poolState"
+        },
+        {
+          "name": "adminProposal",
+          "docs": [
+            "Per-pool proposal PDA. `init` here — re-proposing requires cancelling",
+            "the existing proposal first (system_program::create_account fails on",
+            "pre-existing accounts), which makes accidental overwrite impossible."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "poolState"
+              }
+            ]
+          }
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "newAdmin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "rotateAdmin",
       "docs": [
-        "docs/SPECIFICATION.md §3.7"
+        "docs/SPECIFICATION.md §3.7 — single-step rotation (deprecated, retained",
+        "for backward compatibility / emergency recovery). Prefer the 2-step",
+        "`propose_admin` + `accept_admin` flow."
       ],
       "discriminator": [
         123,
@@ -580,6 +785,19 @@ export type Protocol = {
   ],
   "accounts": [
     {
+      "name": "adminRotationProposal",
+      "discriminator": [
+        111,
+        20,
+        145,
+        43,
+        178,
+        117,
+        74,
+        162
+      ]
+    },
+    {
       "name": "poolState",
       "discriminator": [
         247,
@@ -607,6 +825,32 @@ export type Protocol = {
     }
   ],
   "events": [
+    {
+      "name": "adminProposalCancelled",
+      "discriminator": [
+        158,
+        7,
+        69,
+        243,
+        15,
+        126,
+        0,
+        184
+      ]
+    },
+    {
+      "name": "adminProposalCreated",
+      "discriminator": [
+        26,
+        201,
+        39,
+        134,
+        209,
+        40,
+        200,
+        41
+      ]
+    },
     {
       "name": "adminRotated",
       "discriminator": [
@@ -774,6 +1018,16 @@ export type Protocol = {
       "msg": "authorized_oracle_signer must not be the default Pubkey."
     },
     {
+      "code": 12109,
+      "name": "invalidNewAdmin",
+      "msg": "new_admin must not be zero or equal to the current admin."
+    },
+    {
+      "code": 12110,
+      "name": "proposalStale",
+      "msg": "Admin-rotation proposal is stale: pool admin changed since it was created."
+    },
+    {
       "code": 12200,
       "name": "unauthorizedOracle",
       "msg": "Unauthorized oracle signer."
@@ -856,6 +1110,54 @@ export type Protocol = {
   ],
   "types": [
     {
+      "name": "adminProposalCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelledNewAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminProposalCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposedBy",
+            "type": "pubkey"
+          },
+          {
+            "name": "newAdmin",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "adminRotated",
       "type": {
         "kind": "struct",
@@ -875,6 +1177,57 @@ export type Protocol = {
           {
             "name": "slot",
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "adminRotationProposal",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "docs": [
+              "Which pool this proposal targets."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proposedBy",
+            "docs": [
+              "The admin pubkey that proposed it (must match pool_state.admin at the",
+              "time the proposal was created). Stored so a subsequent admin rotation",
+              "can invalidate stale proposals on review."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "newAdmin",
+            "docs": [
+              "The new admin candidate. Must sign `accept_admin` to take effect."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "createdSlot",
+            "docs": [
+              "Slot the proposal was created. For audit + (future) expiry."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "reserved",
+            "type": {
+              "array": [
+                "u8",
+                7
+              ]
+            }
           }
         ]
       }
@@ -1402,6 +1755,11 @@ export type Protocol = {
     }
   ],
   "constants": [
+    {
+      "name": "adminProposalSeed",
+      "type": "bytes",
+      "value": "[97, 100, 109, 105, 110, 95, 112, 114, 111, 112, 111, 115, 97, 108]"
+    },
     {
       "name": "maxDepthBps",
       "docs": [

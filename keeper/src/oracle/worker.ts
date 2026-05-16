@@ -66,6 +66,48 @@ export async function startOracleWorker(
   // RPC is down or rate-limited.
   let consecutiveFailures = 0;
 
+  // Shutdown signal: lets in-flight sleeps wake immediately on SIGINT/SIGTERM
+  // instead of waiting up to 30s (backoff cap) or the mode-C 30s poll interval.
+  const shutdown = new AbortController();
+  function interruptibleSleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      if (shutdown.signal.aborted) return resolve();
+      const t = setTimeout(() => {
+        shutdown.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      shutdown.signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  // Re-sync the in-memory nonce from on-chain. After repeated failures we may
+  // be out of step with chain state (e.g. a tx that we thought failed actually
+  // landed, advancing the on-chain nonce past our counter). Refetch and reset.
+  async function resyncNonceFromChain(): Promise<void> {
+    try {
+      const onChain = await program.program.account.poolState.fetch(
+        state.pool.poolState
+      );
+      const onChainNonce = BigInt(onChain.oracleNonce.toString());
+      if (onChainNonce !== state.lastPushedNonce) {
+        console.warn(
+          yellow(
+            `  [oracle] nonce drift detected — local=${state.lastPushedNonce}, chain=${onChainNonce} → resyncing`
+          )
+        );
+        state.lastPushedNonce = onChainNonce;
+      }
+    } catch (err) {
+      console.error(
+        red(`  [oracle] resyncNonceFromChain failed: ${(err as Error).message}`)
+      );
+    }
+  }
+
   // Update source ticks in the background.
   const sourceStop = await source.start();
 
@@ -221,6 +263,12 @@ export async function startOracleWorker(
             `  [oracle] backoff ${extra}ms (consecutive failures=${consecutiveFailures})`
           )
         );
+        // After 5 failures the local nonce counter may have drifted from chain
+        // (e.g. a tx we thought failed actually landed). Re-read on-chain
+        // nonce before retrying so we don't keep submitting a stale value.
+        if (consecutiveFailures === 5 || consecutiveFailures % 10 === 0) {
+          await resyncNonceFromChain();
+        }
       }
 
       if (config.verbose && state.currentMode === "A" && elapsed > intervalMs) {
@@ -230,13 +278,14 @@ export async function startOracleWorker(
           )
         );
       }
-      await new Promise((r) => setTimeout(r, sleepMs));
+      await interruptibleSleep(sleepMs);
     }
   })().catch((e) => console.error(red(`Oracle loop crashed: ${e}`)));
 
   return {
     async stop() {
       running = false;
+      shutdown.abort();
       sourceStop();
     },
   };

@@ -268,17 +268,21 @@ let lamports = from_wad_ceil(wad_value)?;     // WAD → u64 (round up)
 
 ### Seed ID Ranges
 
-To prevent PDA collisions in parallel tests, each test file uses a unique seed range:
+To prevent PDA collisions in parallel tests, each test file uses a unique seed
+range. New test files should use the `setupPool(ctx, seedId)` helper from
+`tests/helpers/setup.ts`, which creates a fully-initialized, isolated pool
+with fresh keys / mints / vaults / ATAs.
 
-<!-- Add your test files here:
+| Test File           | Seed Range | Description                                  |
+|---------------------|------------|----------------------------------------------|
+| protocol.test.ts    | (legacy)   | Global shared pool (order-dependent)         |
+| *.test.ts (new)     | 100–199    | First new feature suite                      |
+| *.test.ts (new)     | 200–299    | Second new feature suite                     |
+| ...                 | +100 each  | Add a block per file                         |
 
-| Test File | Seed Range | Description |
-|-----------|------------|-------------|
-| my_feature.test.ts | 100-199 | Feature tests |
-
--->
-
-_No test files yet. Assign ranges as you add tests._
+Why this still matters with `setupPool`: PDA collision is already prevented
+because each call generates fresh random mints, but the seedId is the
+canonical knob for deterministic logging and `--testNamePattern` filtering.
 
 ### Test Helper Functions
 
