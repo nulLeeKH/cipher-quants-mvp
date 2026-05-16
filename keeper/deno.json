@@ -4,11 +4,12 @@
   "version": "0.1.0",
   "exports": "./src/main.ts",
   "tasks": {
-    "dev": "deno run -A --unstable-sloppy-imports src/main.ts",
-    "start": "deno run -A --unstable-sloppy-imports src/main.ts oracle",
-    "oracle": "deno run -A --unstable-sloppy-imports src/main.ts oracle",
-    "init-pool": "deno run -A --unstable-sloppy-imports src/main.ts init-pool",
-    "status": "deno run -A --unstable-sloppy-imports src/main.ts status",
+    "_perms": "--allow-read --allow-write --allow-env --allow-net --allow-sys",
+    "dev": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts",
+    "start": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts oracle",
+    "oracle": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts oracle",
+    "init-pool": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts init-pool",
+    "status": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts status",
     "check": "deno check --unstable-sloppy-imports src/main.ts",
     "compile": "deno compile -A --unstable-sloppy-imports --output keeper-bot src/main.ts"
   },

@@ -51,6 +51,9 @@ pub enum ErrorCode {
     #[msg("SkewParams out of allowed range.")]
     InvalidSkewParams,
 
+    #[msg("authorized_oracle_signer must not be the default Pubkey.")]
+    InvalidOracleSignerKey,
+
     // ----- 62xx authorization & state -----
     #[msg("Unauthorized oracle signer.")]
     UnauthorizedOracle = 6200,
@@ -85,6 +88,9 @@ pub enum ErrorCode {
 
     #[msg("Signed quote ed25519 signature verification failed.")]
     QuoteSignatureInvalid,
+
+    #[msg("Quote nonce already consumed (replay rejected).")]
+    QuoteAlreadyUsed,
 
     // ----- 64xx execution -----
     #[msg("Output amount below min_output (slippage exceeded).")]

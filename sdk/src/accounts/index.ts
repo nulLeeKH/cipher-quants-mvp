@@ -67,14 +67,22 @@ export function deriveQuoteNonceMarker(
 /**
  * Sort two mints lexicographically. Returns [base, quote] where base < quote.
  * Required by init_pool's MintsNotSorted invariant.
+ *
+ * Cross-runtime safe — does NOT depend on Node.js `Buffer.compare`. Works in
+ * browser (Next.js), Deno (keeper / api), and Node.
  */
 export function sortMints(
   mintA: PublicKey,
   mintB: PublicKey
 ): [PublicKey, PublicKey] {
-  const a = mintA.toBuffer();
-  const b = mintB.toBuffer();
-  return Buffer.compare(a, b) < 0 ? [mintA, mintB] : [mintB, mintA];
+  const a = mintA.toBytes();
+  const b = mintB.toBytes();
+  for (let i = 0; i < 32; i++) {
+    if (a[i] !== b[i]) {
+      return a[i] < b[i] ? [mintA, mintB] : [mintB, mintA];
+    }
+  }
+  return [mintA, mintB]; // equal — Pubkey collision, caller should reject via InvalidMintPair on-chain
 }
 
 // ============================================================================

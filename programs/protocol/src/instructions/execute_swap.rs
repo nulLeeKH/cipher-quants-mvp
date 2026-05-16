@@ -66,9 +66,13 @@ pub fn process_execute_swap<'info>(
     require!(!pool.paused, ErrorCode::PoolPaused);
     require!(input_amount > 0, ErrorCode::InvalidSize);
 
-    let curve_age = now.saturating_sub(pool.last_oracle_update_slot);
-    let curve_fresh =
-        pool.current_mode_ttl > 0 && curve_age <= pool.current_mode_ttl as u64;
+    // Fork rollback safety: if now < last_oracle_update_slot, the oracle was
+    // pushed in a slot that has been rolled back, so we force the curve to
+    // stale. Relying on saturating_sub alone would yield age=0 (fresh) and
+    // execute against the rolled-back price.
+    let curve_fresh = pool.current_mode_ttl > 0
+        && now >= pool.last_oracle_update_slot
+        && (now - pool.last_oracle_update_slot) <= pool.current_mode_ttl as u64;
 
     // Decision policy §3.1: curve-first. When the curve is fresh, ignore signed_quote_opt.
     let mut mode: u8 = 0; // 0=curve, 1=rfq (for the emitted event)
@@ -249,10 +253,11 @@ fn init_quote_nonce_marker<'info>(
 
     require!(marker_info.key() == expected_addr, ErrorCode::WrongPool);
     // If already initialized, system_program::create_account will fail; we add an
-    // explicit check here as well for clearer error semantics.
+    // explicit check here so callers see a clear `QuoteAlreadyUsed` (replay)
+    // error code instead of the generic signature-invalid one.
     require!(
         marker_info.data_is_empty() && marker_info.lamports() == 0,
-        ErrorCode::QuoteSignatureInvalid
+        ErrorCode::QuoteAlreadyUsed
     );
 
     let space = 8 + QuoteNonceMarker::INIT_SPACE;

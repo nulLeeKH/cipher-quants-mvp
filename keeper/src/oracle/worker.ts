@@ -12,7 +12,7 @@
 // from the on-chain nonce. Every push increments nonce; on failure the counter
 // is rolled back.
 
-import { Keypair, SystemProgram, PublicKey } from "@solana/web3.js";
+import { ComputeBudgetProgram, Keypair, SystemProgram, PublicKey } from "@solana/web3.js";
 import { bold, cyan, dim, red, yellow } from "@std/fmt/colors";
 
 import { BN } from "../anchor.ts";
@@ -62,6 +62,9 @@ export async function startOracleWorker(
   let lastUpgradeTriggerAt = Date.now();
   let lastNbboMid = state.latestTick.fairValue;
   let nbbo30sMoveBps = 0;
+  // Consecutive failure counter — guards against a tight retry loop when the
+  // RPC is down or rate-limited.
+  let consecutiveFailures = 0;
 
   // Update source ticks in the background.
   const sourceStop = await source.start();
@@ -78,6 +81,19 @@ export async function startOracleWorker(
 
     const newNonce = state.lastPushedNonce + 1n;
 
+    // Cancel priority — per-mode priority fee (microLamports / CU). Mode A
+    // must land before snipers for stale-quote defense to hold. Mode C never
+    // pushes, so it pays no fee.
+    const priorityFee =
+      mode === "A"
+        ? config.oracleModeAPriorityFeeMicrolamports
+        : mode === "B"
+        ? config.oracleModeBPriorityFeeMicrolamports
+        : 0;
+    const preIxs = priorityFee > 0
+      ? [ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee })]
+      : [];
+
     try {
       const sig = await program.program.methods
         .updateOracle(
@@ -92,6 +108,7 @@ export async function startOracleWorker(
           oracleSigner: state.oracleSigner.publicKey,
           poolState: state.pool.poolState,
         })
+        .preInstructions(preIxs)
         .signers([state.oracleSigner])
         .rpc();
 
@@ -102,6 +119,7 @@ export async function startOracleWorker(
       state.currentMode = mode;
       state.lastPushAt = Date.now();
       state.latestTick = tick;
+      consecutiveFailures = 0;
 
       if (config.verbose) {
         console.log(
@@ -111,7 +129,12 @@ export async function startOracleWorker(
         );
       }
     } catch (err) {
-      console.error(red(`  [oracle] push failed: ${(err as Error).message}`));
+      consecutiveFailures += 1;
+      console.error(
+        red(
+          `  [oracle] push failed (consecutive=${consecutiveFailures}): ${(err as Error).message}`
+        )
+      );
       // Counter is NOT advanced — the next attempt will reuse the same nonce.
     }
   }
@@ -122,6 +145,11 @@ export async function startOracleWorker(
     await pushOracle();
 
     while (running) {
+      // Cycle start. We must subtract push latency from the sleep so the real
+      // cadence matches the interval. Otherwise Mode A's 200ms interval grows
+      // to 300–500ms once push latency (100–300ms) is added.
+      const cycleStart = Date.now();
+
       const tick = await source.current();
       state.latestTick = tick;
 
@@ -170,12 +198,38 @@ export async function startOracleWorker(
       }
       // Mode C: sleep — no push.
 
-      const sleepMs =
+      const intervalMs =
         state.currentMode === "A"
           ? config.oracleModeAPushIntervalMs
           : state.currentMode === "B"
           ? config.oracleModeBEvalIntervalMs
           : config.oracleModeCPollIntervalMs;
+      const elapsed = Date.now() - cycleStart;
+      let sleepMs = Math.max(0, intervalMs - elapsed);
+
+      // Exponential backoff — if the RPC is down or rate-limited, a tight loop
+      // makes things worse. After 3 consecutive failures, add 200ms · 2^(n-3)
+      // (capped at 30s) on top of the normal sleep.
+      if (consecutiveFailures >= 3) {
+        const extra = Math.min(
+          30_000,
+          200 * Math.pow(2, Math.min(consecutiveFailures - 3, 7))
+        );
+        sleepMs += extra;
+        console.warn(
+          yellow(
+            `  [oracle] backoff ${extra}ms (consecutive failures=${consecutiveFailures})`
+          )
+        );
+      }
+
+      if (config.verbose && state.currentMode === "A" && elapsed > intervalMs) {
+        console.warn(
+          yellow(
+            `  [oracle] mode A cycle overshoot: elapsed=${elapsed}ms > interval=${intervalMs}ms`
+          )
+        );
+      }
       await new Promise((r) => setTimeout(r, sleepMs));
     }
   })().catch((e) => console.error(red(`Oracle loop crashed: ${e}`)));

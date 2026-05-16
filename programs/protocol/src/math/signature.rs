@@ -108,6 +108,25 @@ pub fn verify_signed_quote_signature(
         ErrorCode::QuoteSignatureInvalid
     );
 
+    // Defense-in-depth: enforce the canonical ed25519 verify-ix layout
+    //   [0..16) header, [16..48) pubkey, [48..112) signature, [112..112+msg_size) message.
+    // The SDK (`Ed25519Program.createInstructionWithPrivateKey`) emits this
+    // layout. Other offset arrangements can't bypass cryptographic verification,
+    // but rejecting non-canonical payloads shrinks the attack surface.
+    let expected_total_len = ED25519_SIG_OFFSET_HEADER_LEN
+        .checked_add(ED25519_PUBKEY_LEN)
+        .and_then(|n| n.checked_add(ED25519_SIGNATURE_LEN))
+        .and_then(|n| n.checked_add(msg_size))
+        .ok_or(error!(ErrorCode::QuoteSignatureInvalid))?;
+    require!(
+        data.len() == expected_total_len
+            && pk_offset == ED25519_SIG_OFFSET_HEADER_LEN
+            && sig_offset == ED25519_SIG_OFFSET_HEADER_LEN + ED25519_PUBKEY_LEN
+            && msg_offset
+                == ED25519_SIG_OFFSET_HEADER_LEN + ED25519_PUBKEY_LEN + ED25519_SIGNATURE_LEN,
+        ErrorCode::QuoteSignatureInvalid
+    );
+
     // 5. Match the public key.
     let pk_bytes = &data[pk_offset..pk_end];
     require!(

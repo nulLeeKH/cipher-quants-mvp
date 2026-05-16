@@ -64,6 +64,12 @@ pub fn process_init_pool(
     let quote_mint = ctx.accounts.quote_mint.key();
     require!(base_mint != quote_mint, ErrorCode::InvalidMintPair);
     require!(base_mint < quote_mint, ErrorCode::MintsNotSorted);
+    // Reject Pubkey::default() — otherwise update_oracle and RFQ verify become
+    // permanently impossible (no one can sign as the all-zero key).
+    require!(
+        authorized_oracle_signer != Pubkey::default(),
+        ErrorCode::InvalidOracleSignerKey
+    );
     require!(initial_mode_ttl <= MAX_TTL_SLOTS, ErrorCode::InvalidTtl);
     require!(initial_fair_value > 0, ErrorCode::InvalidFairValue);
     require!(

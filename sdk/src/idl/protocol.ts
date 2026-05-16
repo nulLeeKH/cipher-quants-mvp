@@ -99,7 +99,30 @@ export type Protocol = {
           "signer": true
         },
         {
-          "name": "poolState"
+          "name": "poolState",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool_state.base_mint",
+                "account": "poolState"
+              },
+              {
+                "kind": "account",
+                "path": "pool_state.quote_mint",
+                "account": "poolState"
+              }
+            ]
+          }
         },
         {
           "name": "quoteNonceMarker",
@@ -746,6 +769,11 @@ export type Protocol = {
       "msg": "SkewParams out of allowed range."
     },
     {
+      "code": 12108,
+      "name": "invalidOracleSignerKey",
+      "msg": "authorized_oracle_signer must not be the default Pubkey."
+    },
+    {
       "code": 12200,
       "name": "unauthorizedOracle",
       "msg": "Unauthorized oracle signer."
@@ -799,6 +827,11 @@ export type Protocol = {
       "code": 12306,
       "name": "quoteSignatureInvalid",
       "msg": "Signed quote ed25519 signature verification failed."
+    },
+    {
+      "code": 12307,
+      "name": "quoteAlreadyUsed",
+      "msg": "Quote nonce already consumed (replay rejected)."
     },
     {
       "code": 12400,
@@ -1268,7 +1301,8 @@ export type Protocol = {
             "name": "signature",
             "docs": [
               "ed25519 signature over Borsh(SignedQuoteMessage). On-chain verification",
-              "cross-checks this against the ed25519 native program payload via the instructions sysvar."
+              "cross-checks this against the ed25519 native program payload read from",
+              "the instructions sysvar."
             ],
             "type": {
               "array": [

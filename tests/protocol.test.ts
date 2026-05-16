@@ -21,12 +21,65 @@ import {
   buildSignedQuoteWithVerifyIx,
   parseEventsFromTx,
   simulateSwap,
+  serializeSignedQuoteMessage,
   PRICE_SCALE,
 } from "../sdk/dist";
 
 const FAIR = new anchor.BN(100_000_000); // $100 × PRICE_SCALE(1e6)
 const SPREAD_BPS = 20;
 const TTL_MODE_B = 3;
+
+// ============================================================================
+// Borsh parity: SDK ↔ on-chain SignedQuoteMessage byte-for-byte
+// ============================================================================
+// Uses the same fixture as the `signed_quote_message_golden_bytes` test in
+// programs/protocol/src/state/quote.rs. Both sides must pass for RFQ
+// signature verification to work; if either drifts, the entire RFQ path is
+// silently rejected on-chain.
+describe("Borsh parity (SignedQuoteMessage)", () => {
+  it("SDK serializer matches the golden bytes used by on-chain Rust test", () => {
+    const pool = new anchor.web3.PublicKey(new Uint8Array(32).fill(0x01));
+    const user = new anchor.web3.PublicKey(new Uint8Array(32).fill(0x02));
+    const bytes = serializeSignedQuoteMessage({
+      pool,
+      user,
+      direction: "sell",
+      inputAmount: 1_000n,
+      price: 100_000_000n,
+      expirySlot: 200n,
+      nonce: 1n,
+    });
+
+    expect(bytes.length).toBe(97);
+
+    const expected = new Uint8Array(97);
+    expected.fill(0x01, 0, 32);
+    expected.fill(0x02, 32, 64);
+    expected[64] = 0x01; // Side::Sell
+    const view = new DataView(expected.buffer);
+    view.setBigUint64(65, 1_000n, true);
+    view.setBigUint64(73, 100_000_000n, true);
+    view.setBigUint64(81, 200n, true);
+    view.setBigUint64(89, 1n, true);
+
+    expect(Array.from(bytes)).toEqual(Array.from(expected));
+  });
+
+  it("Side::Buy = 0 (matches on-chain Borsh enum discriminant)", () => {
+    const pool = new anchor.web3.PublicKey(new Uint8Array(32).fill(0));
+    const user = new anchor.web3.PublicKey(new Uint8Array(32).fill(0));
+    const bytes = serializeSignedQuoteMessage({
+      pool,
+      user,
+      direction: "buy",
+      inputAmount: 0n,
+      price: 0n,
+      expirySlot: 0n,
+      nonce: 0n,
+    });
+    expect(bytes[64]).toBe(0x00);
+  });
+});
 
 describe("Protocol", () => {
   let ctx: TestContext;

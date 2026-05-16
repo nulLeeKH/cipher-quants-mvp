@@ -92,17 +92,32 @@ export async function createExecuteSwapIx(
   program: Program<Protocol>,
   params: ExecuteSwapParams
 ): Promise<TransactionInstruction> {
+  // RFQ-path consistency — if signedQuote is set but quoteNonceMarker is not,
+  // the on-chain program errors cryptically. Catch the mistake at the SDK
+  // entry point.
+  if (params.signedQuote && !params.quoteNonceMarker) {
+    throw new Error(
+      "executeSwap: signedQuote provided without quoteNonceMarker. " +
+        "Use executeSwapWithVerify() helper or derive the marker via deriveQuoteNonceMarker()."
+    );
+  }
+
   const directionArg = sideToArg(params.direction);
   // SignedQuoteArg.direction is already in SideArg union-object form
   // (buildSignedQuoteWithVerifyIx performs the conversion).
   const signedQuoteArg = params.signedQuote ?? null;
 
+  // Anchor IDL-generated argument types use deeply-nested unions; passing our
+  // typed SideArg / SignedQuoteArg matches at runtime but is too narrow for
+  // Anchor's structural compare. We trust the runtime layout and accept the
+  // structural cast (NOT a security guard — Borsh discriminants are tested in
+  // tests/protocol.test.ts "Borsh parity").
   let builder = program.methods
     .executeSwap(
       params.inputAmount,
-      directionArg as any,
+      directionArg as Parameters<typeof program.methods.executeSwap>[1],
       params.minOutput,
-      signedQuoteArg as any
+      signedQuoteArg as Parameters<typeof program.methods.executeSwap>[3]
     )
     .accountsPartial({
       user: params.user,

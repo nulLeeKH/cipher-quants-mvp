@@ -43,6 +43,14 @@ export interface KeeperConfig {
   /** Mode C — never pushes; this is only the polling interval for mode detection. */
   oracleModeCPollIntervalMs: number;
 
+  // ----- Cancel priority (compute unit price, microLamports / CU) -----
+  // OPERATIONS §4.5 — Mode A must land before snipers for stale-quote defense
+  // to hold. We set the priority fee via ComputeBudgetProgram.setComputeUnitPrice.
+  // Jito tips are out of scope for the PoC (they require a separate bundle
+  // endpoint).
+  oracleModeAPriorityFeeMicrolamports: number;
+  oracleModeBPriorityFeeMicrolamports: number;
+
   // ----- RFQ webhook -----
   /** HTTP server port (JupiterZ webhook) */
   webhookPort: number;
@@ -112,6 +120,18 @@ export function loadConfig(args: Record<string, unknown>): KeeperConfig {
     ),
     oracleModeCPollIntervalMs: parseInt(
       envOptional("ORACLE_MODE_C_POLL_INTERVAL_MS", "30000"),
+      10
+    ),
+
+    // Cancel priority fees, units: microLamports / CU.
+    // Mode A=50k (≈10k lamports @ 200 CU), Mode B=5k (≈1k lamports). Tune
+    // against network congestion once in production.
+    oracleModeAPriorityFeeMicrolamports: parseInt(
+      envOptional("ORACLE_MODE_A_PRIORITY_FEE_MICROLAMPORTS", "50000"),
+      10
+    ),
+    oracleModeBPriorityFeeMicrolamports: parseInt(
+      envOptional("ORACLE_MODE_B_PRIORITY_FEE_MICROLAMPORTS", "5000"),
       10
     ),
 

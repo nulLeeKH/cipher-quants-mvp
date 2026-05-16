@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::SAFETY_BUFFER_SLOTS;
+use crate::constants::{POOL_SEED, SAFETY_BUFFER_SLOTS};
 use crate::error::ErrorCode;
 use crate::events::QuoteMarkerClosed;
 use crate::state::{PoolState, QuoteNonceMarker};
@@ -12,6 +12,13 @@ pub struct CloseExpiredNonce<'info> {
     #[account(mut)]
     pub closer: Signer<'info>,
 
+    // Defense-in-depth: enforce pool_state as a PDA. Pubkey collisions are
+    // impossible on Solana, but the explicit constraint keeps this account
+    // consistent with execute_swap.rs and makes intent clear during review.
+    #[account(
+        seeds = [POOL_SEED, pool_state.base_mint.as_ref(), pool_state.quote_mint.as_ref()],
+        bump = pool_state.bump,
+    )]
     pub pool_state: Account<'info, PoolState>,
 
     #[account(

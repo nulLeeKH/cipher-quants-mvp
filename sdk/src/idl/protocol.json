@@ -93,7 +93,30 @@
           "signer": true
         },
         {
-          "name": "pool_state"
+          "name": "pool_state",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  111,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool_state.base_mint",
+                "account": "PoolState"
+              },
+              {
+                "kind": "account",
+                "path": "pool_state.quote_mint",
+                "account": "PoolState"
+              }
+            ]
+          }
         },
         {
           "name": "quote_nonce_marker",
@@ -740,6 +763,11 @@
       "msg": "SkewParams out of allowed range."
     },
     {
+      "code": 12108,
+      "name": "InvalidOracleSignerKey",
+      "msg": "authorized_oracle_signer must not be the default Pubkey."
+    },
+    {
       "code": 12200,
       "name": "UnauthorizedOracle",
       "msg": "Unauthorized oracle signer."
@@ -793,6 +821,11 @@
       "code": 12306,
       "name": "QuoteSignatureInvalid",
       "msg": "Signed quote ed25519 signature verification failed."
+    },
+    {
+      "code": 12307,
+      "name": "QuoteAlreadyUsed",
+      "msg": "Quote nonce already consumed (replay rejected)."
     },
     {
       "code": 12400,
@@ -1262,7 +1295,8 @@
             "name": "signature",
             "docs": [
               "ed25519 signature over Borsh(SignedQuoteMessage). On-chain verification",
-              "cross-checks this against the ed25519 native program payload via the instructions sysvar."
+              "cross-checks this against the ed25519 native program payload read from",
+              "the instructions sysvar."
             ],
             "type": {
               "array": [

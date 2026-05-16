@@ -18,9 +18,77 @@ import { Buffer } from "node:buffer";
 import { Hono } from "@hono/hono";
 import { Keypair, Connection, PublicKey } from "@solana/web3.js";
 import { createRequire } from "node:module";
-import { bold, cyan, dim, red } from "@std/fmt/colors";
+import { bold, cyan, dim, red, yellow } from "@std/fmt/colors";
 
 import type { ApiConfig } from "./config.ts";
+
+// ============================================================================
+// Lightweight in-memory metrics (Stage 2: replace with Prometheus exporter)
+// ============================================================================
+// OPERATIONS §5.2 — RFQ webhook p95 ≤ 250ms is a Stage 2 → 3 entry gate. Without
+// measurement we can't verify the gate. Ring buffer of 1024 samples tracks
+// p50/p95/p99; memory footprint < 64KB.
+
+const LATENCY_RING_SIZE = 1024;
+const SLOW_WARN_MS = 250;
+
+interface Metrics {
+  quoteRequests: number;
+  quoteSuccess: number;
+  quoteInventoryFail: number;
+  quoteOtherFail: number;
+  swapRequests: number;
+  latenciesMs: number[]; // ring buffer
+  latencyIdx: number;
+}
+
+function newMetrics(): Metrics {
+  return {
+    quoteRequests: 0,
+    quoteSuccess: 0,
+    quoteInventoryFail: 0,
+    quoteOtherFail: 0,
+    swapRequests: 0,
+    latenciesMs: [],
+    latencyIdx: 0,
+  };
+}
+
+function recordLatency(m: Metrics, ms: number): void {
+  if (m.latenciesMs.length < LATENCY_RING_SIZE) {
+    m.latenciesMs.push(ms);
+  } else {
+    m.latenciesMs[m.latencyIdx] = ms;
+    m.latencyIdx = (m.latencyIdx + 1) % LATENCY_RING_SIZE;
+  }
+}
+
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+  return sorted[idx];
+}
+
+function renderMetrics(m: Metrics): string {
+  const sorted = [...m.latenciesMs].sort((a, b) => a - b);
+  const lines = [
+    `# HELP cipher_quote_requests_total Total /quote requests`,
+    `# TYPE cipher_quote_requests_total counter`,
+    `cipher_quote_requests_total ${m.quoteRequests}`,
+    `cipher_quote_success_total ${m.quoteSuccess}`,
+    `cipher_quote_inventory_fail_total ${m.quoteInventoryFail}`,
+    `cipher_quote_other_fail_total ${m.quoteOtherFail}`,
+    `cipher_swap_requests_total ${m.swapRequests}`,
+    `# HELP cipher_quote_latency_ms /quote latency percentiles`,
+    `# TYPE cipher_quote_latency_ms summary`,
+    `cipher_quote_latency_ms{quantile="0.5"} ${percentile(sorted, 50)}`,
+    `cipher_quote_latency_ms{quantile="0.95"} ${percentile(sorted, 95)}`,
+    `cipher_quote_latency_ms{quantile="0.99"} ${percentile(sorted, 99)}`,
+    `cipher_quote_latency_samples ${sorted.length}`,
+    ``,
+  ];
+  return lines.join("\n");
+}
 
 // Load Anchor + SDK via CommonJS require to bypass Deno's strict ESM resolution.
 const require = createRequire(import.meta.url);
@@ -103,11 +171,82 @@ export async function startApiServer(
 
   // ──────────────────────────────────────────────────────────────────────
   // Quote cache (in-memory). Replace with Redis or a dedicated store at Stage 2.
-  const quoteCache = new Map<string, QuoteResponse>();
+  //
+  // Bounded by both size (LRU-style) and TTL — without these, a long-running
+  // process leaks ~432MB/day at 10qps. Eviction happens lazily on every set,
+  // plus a periodic sweep clears anything stale even if traffic stops.
+  const QUOTE_CACHE_MAX_ENTRIES = 10_000;
+  const QUOTE_CACHE_TTL_MS = 5 * 60_000; // 5 min — well past any quoteValidWindowSlots * 400ms
+  interface CachedQuote { resp: QuoteResponse; expiresAtMs: number }
+  const quoteCache = new Map<string, CachedQuote>();
+  function cacheSet(key: string, resp: QuoteResponse): void {
+    const expiresAtMs = Date.now() + QUOTE_CACHE_TTL_MS;
+    // LRU semantics: deletion + re-insert places the entry at the tail.
+    quoteCache.delete(key);
+    quoteCache.set(key, { resp, expiresAtMs });
+    // Evict from the front while over capacity (Map iteration order = insertion).
+    while (quoteCache.size > QUOTE_CACHE_MAX_ENTRIES) {
+      const oldest = quoteCache.keys().next().value;
+      if (oldest === undefined) break;
+      quoteCache.delete(oldest);
+    }
+  }
+  function cacheGet(key: string): QuoteResponse | undefined {
+    const entry = quoteCache.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAtMs < Date.now()) {
+      quoteCache.delete(key);
+      return undefined;
+    }
+    return entry.resp;
+  }
+  // Background sweep — runs every minute and drops expired entries even when
+  // traffic is idle. Cleared on server shutdown.
+  const cacheSweep = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of quoteCache) {
+      if (v.expiresAtMs < now) quoteCache.delete(k);
+    }
+  }, 60_000);
+
+  const metrics = newMetrics();
+
+  // Nonce generation: 8-byte crypto random. Date.now+Math.random can collide
+  // within the same millisecond, which would cause legitimate quotes to be
+  // rejected by the PDA seed marker; the low entropy is also attacker-
+  // predictable. On-chain replay defense lives in quote_nonce_marker, but
+  // uniqueness at issuance must be guaranteed independently.
+  function nextQuoteNonce(): bigint {
+    const buf = new Uint8Array(8);
+    crypto.getRandomValues(buf);
+    return new DataView(buf.buffer).getBigUint64(0, true /* LE: matches the on-chain seed byte order */);
+  }
 
   const app = new Hono();
 
   app.get("/health", (c) => c.text("ok"));
+
+  // /metrics is fail-closed: requires METRICS_AUTH_TOKEN to be configured AND
+  // a matching `Authorization: Bearer <token>` header on the request. Counters
+  // / latency percentiles can reveal traffic shape + inventory state, so we
+  // refuse to leak them publicly.
+  app.get("/metrics", (c) => {
+    const expected = config.metricsAuthToken;
+    if (!expected) {
+      return c.text(
+        "/metrics is disabled (set METRICS_AUTH_TOKEN to enable)\n",
+        503
+      );
+    }
+    const got = c.req.header("authorization") ?? "";
+    const provided = got.startsWith("Bearer ") ? got.slice("Bearer ".length) : "";
+    if (provided !== expected) {
+      return c.text("unauthorized\n", 401);
+    }
+    return c.text(renderMetrics(metrics), 200, {
+      "Content-Type": "text/plain; version=0.0.4",
+    });
+  });
 
   app.get("/tokens", (c) =>
     c.json({
@@ -119,10 +258,13 @@ export async function startApiServer(
   );
 
   app.post("/quote", async (c) => {
+    const t0 = performance.now();
+    metrics.quoteRequests += 1;
     let body: QuoteRequest;
     try {
       body = await c.req.json();
     } catch {
+      metrics.quoteOtherFail += 1;
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
@@ -180,10 +322,35 @@ export async function startApiServer(
           ? (inAmount * PRICE_SCALE) / price
           : (inAmount * price) / PRICE_SCALE;
 
+      // Inventory check — the vault must hold enough of the output token to
+      // satisfy outAmount. Without this, the user's tx would fail on-chain with
+      // InsufficientReserves (user pays fee + burns nonce); pre-rejecting here
+      // protects the fill-rate SLA.
+      const balances = await sdkAccounts.fetchVaultBalances(
+        program,
+        poolAddr,
+        config.baseMint!,
+        config.quoteMint!
+      );
+      const availableOut =
+        direction === "buy" ? balances.baseAmount : balances.quoteAmount;
+      if (availableOut < outAmount) {
+        metrics.quoteInventoryFail += 1;
+        recordLatency(metrics, performance.now() - t0);
+        return c.json(
+          {
+            error: "Insufficient inventory",
+            requested: outAmount.toString(),
+            available: availableOut.toString(),
+            side: direction === "buy" ? "base" : "quote",
+          },
+          503
+        );
+      }
+
       // Build signed quote
       const expirySlot = BigInt(currentSlot + config.quoteValidWindowSlots);
-      const nonce =
-        BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+      const nonce = nextQuoteNonce();
       const built = sdk.buildSignedQuoteWithVerifyIx(quoteSigner, {
         pool: poolAddr,
         user: userPk,
@@ -221,23 +388,35 @@ export async function startApiServer(
         verifyIxBase64: Buffer.from(built.verifyIx.data).toString("base64"),
         quoteNonceMarker: marker.toBase58(),
       };
-      quoteCache.set(quoteId, resp);
+      cacheSet(quoteId, resp);
 
-      if (config.verbose) {
+      metrics.quoteSuccess += 1;
+      const latencyMs = performance.now() - t0;
+      recordLatency(metrics, latencyMs);
+      if (latencyMs > SLOW_WARN_MS) {
+        console.warn(
+          yellow(
+            `  [/quote] slow: ${latencyMs.toFixed(1)}ms > ${SLOW_WARN_MS}ms (OPERATIONS §5.2 gate)`
+          )
+        );
+      } else if (config.verbose) {
         console.log(
           dim(
-            `  [/quote] dir=${direction} price=${price} out=${outAmount} nonce=${nonce}`
+            `  [/quote] dir=${direction} price=${price} out=${outAmount} nonce=${nonce} (${latencyMs.toFixed(1)}ms)`
           )
         );
       }
       return c.json(resp);
     } catch (err) {
+      metrics.quoteOtherFail += 1;
+      recordLatency(metrics, performance.now() - t0);
       console.error(red(`  [/quote] ${(err as Error).message}`));
       return c.json({ error: (err as Error).message }, 500);
     }
   });
 
   app.post("/swap", async (c) => {
+    metrics.swapRequests += 1;
     let body: SwapRequest;
     try {
       body = await c.req.json();
@@ -245,7 +424,7 @@ export async function startApiServer(
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
-    const cached = quoteCache.get(body.quoteId);
+    const cached = cacheGet(body.quoteId);
     if (!cached) return c.json({ error: "Unknown or expired quoteId" }, 404);
 
     return c.json({
@@ -265,6 +444,7 @@ export async function startApiServer(
 
   return {
     async stop() {
+      clearInterval(cacheSweep);
       await server.shutdown();
     },
   };

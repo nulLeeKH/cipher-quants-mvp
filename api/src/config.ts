@@ -25,6 +25,10 @@ export interface ApiConfig {
   /** Quote expiry in slots; expirySlot = currentSlot + N. */
   quoteValidWindowSlots: number;
 
+  /** Bearer token required on /metrics. If unset, the endpoint refuses to serve
+   *  (fail-closed). Set via METRICS_AUTH_TOKEN env var. */
+  metricsAuthToken?: string;
+
   verbose: boolean;
 }
 
@@ -75,6 +79,8 @@ export function loadConfig(args: Record<string, unknown>): ApiConfig {
       envOptional("QUOTE_VALID_WINDOW_SLOTS", "200"),
       10
     ),
+
+    metricsAuthToken: Deno.env.get("METRICS_AUTH_TOKEN"),
 
     verbose:
       (args.verbose as boolean) || Deno.env.get("VERBOSE") === "true",

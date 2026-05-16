@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "exports": "./src/main.ts",
   "tasks": {
-    "dev": "deno run -A --unstable-sloppy-imports src/main.ts",
-    "start": "deno run -A --unstable-sloppy-imports src/main.ts",
+    "_perms": "--allow-read --allow-write --allow-env --allow-net --allow-sys",
+    "dev": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts",
+    "start": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts",
     "check": "deno check --unstable-sloppy-imports src/main.ts",
     "compile": "deno compile -A --unstable-sloppy-imports --output api-server src/main.ts"
   },

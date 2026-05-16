@@ -45,9 +45,30 @@ export interface SignedQuoteMessage {
   nonce: bigint;
 }
 
+const U64_MAX = (1n << 64n) - 1n;
+
+/** Throws on values that wouldn't survive u64 round-trip via on-chain Borsh. */
+function assertU64(name: string, v: bigint): void {
+  if (typeof v !== "bigint") {
+    throw new Error(`${name} must be a bigint`);
+  }
+  if (v < 0n || v > U64_MAX) {
+    throw new Error(`${name} out of u64 range: ${v.toString()}`);
+  }
+}
+
 export function serializeSignedQuoteMessage(
   msg: SignedQuoteMessage
 ): Uint8Array {
+  // u64 range guard — DataView.setBigUint64 throws on out-of-range values, but
+  // the message is opaque, so we translate to a clear error at the SDK entry
+  // point. The on-chain ed25519 verify accepts only the exact byte layout
+  // (no truncation), making this guard load-bearing for RFQ correctness.
+  assertU64("inputAmount", msg.inputAmount);
+  assertU64("price", msg.price);
+  assertU64("expirySlot", msg.expirySlot);
+  assertU64("nonce", msg.nonce);
+
   const buf = new Uint8Array(97);
   buf.set(msg.pool.toBuffer(), 0); // 32
   buf.set(msg.user.toBuffer(), 32); // 32

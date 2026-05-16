@@ -155,12 +155,26 @@ export default function SwapPage() {
     }
   }, [pool, vaultReserves, inputBig, direction]);
 
+  // Slippage validation — do NOT silently fall back to 0 on invalid input.
+  // A negative value yields 0% protection; >=10000 makes (10_000n - slipBps)
+  // negative, so minOutput goes negative and the on-chain check is no-op.
+  // Both are user-invisible footguns, so we reject them explicitly.
+  const slippageValidation = React.useMemo<
+    { ok: true; bps: bigint } | { ok: false; error: string }
+  >(() => {
+    const raw = slippageBps.trim();
+    if (raw === "") return { ok: false, error: "Required" };
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return { ok: false, error: "Must be a number" };
+    if (n < 0) return { ok: false, error: "Must be >= 0" };
+    if (n >= 10_000) return { ok: false, error: "Must be < 10000 (100%)" };
+    return { ok: true, bps: BigInt(Math.floor(n)) };
+  }, [slippageBps]);
+
   const minOutput = React.useMemo(() => {
-    if (!simulation) return 0n;
-    const slip = Number(slippageBps);
-    const slipBps = Number.isFinite(slip) && slip >= 0 ? BigInt(Math.floor(slip)) : 0n;
-    return (simulation.outputAmount * (10_000n - slipBps)) / 10_000n;
-  }, [simulation, slippageBps]);
+    if (!simulation || !slippageValidation.ok) return 0n;
+    return (simulation.outputAmount * (10_000n - slippageValidation.bps)) / 10_000n;
+  }, [simulation, slippageValidation]);
 
   const inputTokenLabel = direction === "buy" ? "quote" : "base";
   const outputTokenLabel = direction === "buy" ? "base" : "quote";
@@ -234,6 +248,18 @@ export default function SwapPage() {
         const q = await quoteResp.json();
 
         const sq = q.signedQuote;
+
+        // Expiry check — the quote's expirySlot may already be in the past by
+        // the time we receive it (slow API round-trip, or immediately after a
+        // mode switch). Pre-rejecting on the client avoids burning the nonce +
+        // tx fee and prevents confusing on-chain errors for the user.
+        const currentSlot = await connection.getSlot("confirmed");
+        const quoteExpirySlot = Number(sq.expirySlot);
+        if (Number.isFinite(quoteExpirySlot) && quoteExpirySlot <= currentSlot) {
+          throw new Error(
+            `Quote already expired (expiry=${quoteExpirySlot}, current=${currentSlot}). Try again.`
+          );
+        }
         const signedQuote = {
           pool: new PublicKey(sq.pool),
           user: new PublicKey(sq.user),
@@ -428,13 +454,26 @@ export default function SwapPage() {
                 onChange={(e) => setSlippageBps(e.target.value)}
                 placeholder="50"
                 inputMode="numeric"
+                aria-invalid={!slippageValidation.ok}
               />
+              {!slippageValidation.ok && (
+                <div className="text-xs text-destructive">
+                  {slippageValidation.error}
+                </div>
+              )}
             </div>
 
             <Button
               className="w-full"
               size="lg"
-              disabled={!publicKey || !pool || pool.state.paused || submitting || !simulation}
+              disabled={
+                !publicKey ||
+                !pool ||
+                pool.state.paused ||
+                submitting ||
+                !simulation ||
+                !slippageValidation.ok
+              }
               onClick={() => void submitSwap()}
             >
               {submitting ? (
