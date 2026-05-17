@@ -14,10 +14,10 @@ default = []
 # Lets a downstream crate depend on us for types without pulling the
 # Pinocchio program entrypoint (would conflict with their own).
 no-entrypoint = []
-# Extended staleness threshold for devnet oracle feeds.
-devnet = []
 # Test-only feature: builds the on-chain test helpers used by the
 # integration suite (parity with the prior Anchor `test-feature` flag).
+# Currently only flips `SAFETY_BUFFER_SLOTS` from 150 to 5 so the
+# `close_expired_nonce` happy-path test doesn't sit for a full minute.
 test-feature = []
 
 [dependencies]

@@ -9,7 +9,12 @@ import {
   createSetPausedIx,
   createRotateOracleSignerIx,
   createRotateAdminIx,
+  createProposeAdminIx,
+  createAcceptAdminIx,
+  createCancelAdminProposalIx,
+  deriveAdminProposal,
   friendlyError,
+  type AdminRotationProposalData,
 } from "@cipher-quants/sdk";
 
 import { AdminGuard } from "@/components/admin/AdminGuard";
@@ -38,7 +43,7 @@ export default function AdminActionsPage() {
 function ActionsView() {
   const { publicKey, sendTransaction } = useWallet();
   const { connection } = useConnection();
-  const { signingProgram } = useProgram();
+  const { signingProgram, readonlyProgram } = useProgram();
   const { toast } = useToast();
 
   const baseMint = POOL_CONFIG.baseMint;
@@ -55,6 +60,33 @@ function ActionsView() {
     description: string;
     action: () => Promise<void>;
   }>(null);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Outstanding admin-rotation proposal — fetched independently of pool
+  // ────────────────────────────────────────────────────────────────────
+  const [proposal, setProposal] = React.useState<AdminRotationProposalData | null>(null);
+  const [proposalLoaded, setProposalLoaded] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!poolAddress) {
+        setProposal(null);
+        setProposalLoaded(true);
+        return;
+      }
+      const [proposalAddr] = deriveAdminProposal(poolAddress, readonlyProgram.programId);
+      const p = await readonlyProgram.account.adminRotationProposal.fetchNullable(proposalAddr);
+      if (cancelled) return;
+      setProposal(p);
+      setProposalLoaded(true);
+    }
+    void load();
+    const id = window.setInterval(load, 6_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [poolAddress, readonlyProgram]);
 
   async function runIx(label: string, build: () => Promise<Transaction>) {
     if (!publicKey || !signingProgram) {
@@ -123,7 +155,7 @@ function ActionsView() {
   };
 
   // ────────────────────────────────────────────────────────────────────
-  // rotate_admin
+  // rotate_admin (single-step — irreversible)
   // ────────────────────────────────────────────────────────────────────
   const [newAdmin, setNewAdmin] = React.useState("");
   const rotateAdmin = async () => {
@@ -142,6 +174,61 @@ function ActionsView() {
       return new Transaction().add(ix);
     });
     setNewAdmin("");
+  };
+
+  // ────────────────────────────────────────────────────────────────────
+  // 2-step admin rotation (propose / accept / cancel)
+  // ────────────────────────────────────────────────────────────────────
+  const [proposeNewAdmin, setProposeNewAdmin] = React.useState("");
+  const proposeAdmin = async () => {
+    if (!pool || !poolAddress || !publicKey || !signingProgram) return;
+    if (!isValidPubkeyString(proposeNewAdmin)) {
+      toast({ title: "Invalid pubkey", variant: "destructive" });
+      return;
+    }
+    const nextPk = new PublicKey(proposeNewAdmin);
+    await runIx("Propose admin", async () => {
+      const ix = await createProposeAdminIx(signingProgram, {
+        admin: publicKey,
+        poolState: poolAddress,
+        newAdmin: nextPk,
+      });
+      return new Transaction().add(ix);
+    });
+    setProposeNewAdmin("");
+  };
+
+  // Accept signs with the *new* admin wallet — so the currently-connected
+  // wallet must be the proposed new_admin, not the current admin.
+  const acceptAdmin = async () => {
+    if (!pool || !poolAddress || !publicKey || !signingProgram || !proposal) return;
+    if (!publicKey.equals(proposal.newAdmin)) {
+      toast({
+        title: "Wrong wallet",
+        description:
+          "Connect the wallet that matches the proposed new admin to accept.",
+        variant: "destructive",
+      });
+      return;
+    }
+    await runIx("Accept admin", async () => {
+      const ix = await createAcceptAdminIx(signingProgram, {
+        newAdmin: publicKey,
+        poolState: poolAddress,
+      });
+      return new Transaction().add(ix);
+    });
+  };
+
+  const cancelProposal = async () => {
+    if (!pool || !poolAddress || !publicKey || !signingProgram) return;
+    await runIx("Cancel proposal", async () => {
+      const ix = await createCancelAdminProposalIx(signingProgram, {
+        admin: publicKey,
+        poolState: poolAddress,
+      });
+      return new Transaction().add(ix);
+    });
   };
 
   return (
@@ -253,12 +340,139 @@ function ActionsView() {
         </CardFooter>
       </Card>
 
-      {/* Rotate admin */}
+      {/* Rotate admin — 2-step (recommended) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">
+            Rotate admin — 2-step{" "}
+            {proposalLoaded && proposal && (
+              <Badge variant="warning">Proposal pending</Badge>
+            )}
+          </CardTitle>
+          <CardDescription>
+            Recommended: propose with the current admin, then accept from the
+            new admin wallet. Mitigates &ldquo;wrong pubkey typed&rdquo; risk
+            of the irreversible single-step rotation below.
+          </CardDescription>
+        </CardHeader>
+        {!proposalLoaded ? (
+          <CardContent>
+            <div className="text-xs text-muted-foreground">Loading proposal state…</div>
+          </CardContent>
+        ) : proposal ? (
+          // ----- Existing proposal: accept (new admin) or cancel (current admin) -----
+          <>
+            <CardContent className="space-y-2 text-sm">
+              <div className="grid grid-cols-2 gap-y-1 gap-x-4 font-mono text-xs">
+                <span className="text-muted-foreground">Proposed by</span>
+                <span>{shortAddr(proposal.proposedBy.toBase58(), 10, 10)}</span>
+                <span className="text-muted-foreground">New admin</span>
+                <span>{shortAddr(proposal.newAdmin.toBase58(), 10, 10)}</span>
+                <span className="text-muted-foreground">Created slot</span>
+                <span>{proposal.createdSlot.toString()}</span>
+              </div>
+              {publicKey && !publicKey.equals(proposal.newAdmin) && !publicKey.equals(proposal.proposedBy) && (
+                <div className="text-xs text-muted-foreground">
+                  Connect the new-admin wallet to accept, or the current-admin wallet to cancel.
+                </div>
+              )}
+            </CardContent>
+            <CardFooter className="flex gap-2">
+              <Button
+                disabled={
+                  busy != null ||
+                  !publicKey ||
+                  !publicKey.equals(proposal.newAdmin)
+                }
+                onClick={() =>
+                  setConfirmDialog({
+                    title: "Accept admin role?",
+                    description: `Take over as admin. The current admin (${shortAddr(proposal.proposedBy.toBase58(), 6, 6)}) will lose privileges after this confirms.`,
+                    action: acceptAdmin,
+                  })
+                }
+              >
+                {busy === "Accept admin" ? (
+                  <>
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                    Accepting…
+                  </>
+                ) : (
+                  "Accept (as new admin)"
+                )}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={busy != null || !publicKey}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: "Cancel proposal?",
+                    description:
+                      "Removes the pending proposal. Admin stays unchanged. Either party can call this.",
+                    action: cancelProposal,
+                  })
+                }
+              >
+                {busy === "Cancel proposal" ? (
+                  <>
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                    Cancelling…
+                  </>
+                ) : (
+                  "Cancel proposal"
+                )}
+              </Button>
+            </CardFooter>
+          </>
+        ) : (
+          // ----- No proposal: propose form (current admin) -----
+          <>
+            <CardContent className="space-y-2">
+              <Label htmlFor="propose-new-admin">New admin pubkey</Label>
+              <Input
+                id="propose-new-admin"
+                value={proposeNewAdmin}
+                onChange={(e) => setProposeNewAdmin(e.target.value.trim())}
+                placeholder="Pubkey"
+                spellCheck={false}
+              />
+              <div className="text-xs text-muted-foreground">
+                The proposed admin must explicitly accept from their wallet
+                before the rotation takes effect. Until then, admin stays
+                unchanged.
+              </div>
+            </CardContent>
+            <CardFooter>
+              <Button
+                disabled={!pool || !isValidPubkeyString(proposeNewAdmin) || busy != null}
+                onClick={() =>
+                  setConfirmDialog({
+                    title: "Propose new admin?",
+                    description: `Creates a pending proposal for ${shortAddr(proposeNewAdmin, 6, 6)}. The new admin must accept from their wallet to complete the rotation.`,
+                    action: proposeAdmin,
+                  })
+                }
+              >
+                {busy === "Propose admin" ? (
+                  <>
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                    Proposing…
+                  </>
+                ) : (
+                  "Propose"
+                )}
+              </Button>
+            </CardFooter>
+          </>
+        )}
+      </Card>
+
+      {/* Rotate admin — single-step (irreversible) */}
       <Card className="border-destructive/30">
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <AlertTriangle className="size-4 text-destructive" />
-            Rotate admin
+            Rotate admin — single-step (irreversible)
           </CardTitle>
           <CardDescription>
             Current:{" "}

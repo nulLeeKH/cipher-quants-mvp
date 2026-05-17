@@ -3,9 +3,13 @@
 # Build the on-chain protocol program (Pinocchio-era).
 #
 # Usage:
-#   ./scripts/build.sh              # mainnet (default)
-#   ./scripts/build.sh devnet       # devnet (extended oracle staleness)
-#   ./scripts/build.sh localnet     # localnet
+#   ./scripts/build.sh              # build (default)
+#   ./scripts/build.sh <label>      # same build; <label> is just a tag for logs
+#
+# The same .so is shipped to localnet / devnet / mainnet — no per-cluster
+# cfg gates exist today. If a divergent build target is needed in the
+# future, add a Cargo feature here, in programs/protocol/Cargo.toml, and
+# in any code path that needs to branch on it.
 # ============================================================================
 set -euo pipefail
 
@@ -14,28 +18,9 @@ cd "$ROOT/programs/protocol"
 
 TARGET=${1:-mainnet}
 
-echo "🔨 Building protocol for $TARGET..."
+echo "🔨 Building protocol (label: $TARGET)..."
 
-CARGO_BUILD_SBF_ARGS=()
-case "$TARGET" in
-  mainnet)
-    echo "   Building mainnet version"
-    ;;
-  devnet)
-    echo "   Building devnet version (devnet features enabled)"
-    CARGO_BUILD_SBF_ARGS=(-- --features devnet)
-    ;;
-  localnet)
-    echo "   Building localnet version"
-    ;;
-  *)
-    echo "❌ Unknown target: $TARGET"
-    echo "   Usage: ./scripts/build.sh [mainnet|devnet|localnet]"
-    exit 1
-    ;;
-esac
-
-cargo build-sbf "${CARGO_BUILD_SBF_ARGS[@]}"
+cargo build-sbf
 
 # Check program size
 PROGRAM_PATH="$ROOT/target/deploy/protocol.so"

@@ -1,6 +1,8 @@
 import "jsr:@std/dotenv/load";
 import { PublicKey } from "@solana/web3.js";
 
+import { parsePriceSourceKind } from "./sources/factory.ts";
+
 // ============================================================================
 // Keeper Configuration
 // ============================================================================
@@ -34,6 +36,17 @@ export interface KeeperConfig {
   /** base/quote mints of the pool this keeper operates (single pair in v1). */
   baseMint?: PublicKey;
   quoteMint?: PublicKey;
+
+  // ----- Price source (driven by PRICE_SOURCE env) -----
+  /** `mock` (default) — random walk. `pyth` — Pyth Hermes REST adapter. */
+  priceSource: "mock" | "pyth";
+  /** 64-char hex feed id; required when priceSource = "pyth".
+   *  See https://pyth.network/developers/price-feed-ids */
+  pythFeedId?: string;
+  /** Override the Hermes base URL (default https://hermes.pyth.network). */
+  pythHermesUrl?: string;
+  /** Source poll cadence (ms). Adapter default applies when unset. */
+  priceSourcePollMs?: number;
 
   // ----- Oracle worker timing (ms) -----
   /** Mode A push interval (PoC default 200ms — OPERATIONS §1). */
@@ -109,6 +122,13 @@ export function loadConfig(args: Record<string, unknown>): KeeperConfig {
     programIdOverride: envPubkey("PROGRAM_ID"),
     baseMint: envPubkey("BASE_MINT"),
     quoteMint: envPubkey("QUOTE_MINT"),
+
+    priceSource: parsePriceSourceKind(Deno.env.get("PRICE_SOURCE")),
+    pythFeedId: Deno.env.get("PYTH_FEED_ID"),
+    pythHermesUrl: Deno.env.get("PYTH_HERMES_URL"),
+    priceSourcePollMs: Deno.env.get("PRICE_SOURCE_POLL_MS")
+      ? parseInt(Deno.env.get("PRICE_SOURCE_POLL_MS")!, 10)
+      : undefined,
 
     oracleModeAPushIntervalMs: parseInt(
       envOptional("ORACLE_MODE_A_PUSH_INTERVAL_MS", "200"),

@@ -1,10 +1,11 @@
-import { bold, cyan, dim, red } from "@std/fmt/colors";
+import { bold, cyan, dim, red, yellow } from "@std/fmt/colors";
+import { getMint } from "@solana/spl-token";
 import { createRequire } from "node:module";
 
 import type { KeeperConfig } from "../config.ts";
 import type { KeeperProgram } from "../program.ts";
 import { JsonFileKeypairProvider } from "../wallet.ts";
-import { MockPriceSource } from "../sources/mock.ts";
+import { createPriceSource } from "../sources/factory.ts";
 import { createOracleSharedState } from "../oracle/state.ts";
 import { startOracleWorker } from "../oracle/worker.ts";
 
@@ -43,14 +44,32 @@ export async function runOracle(
   console.log(dim(`  Pool:          ${poolState.toBase58()}`));
   console.log(dim(`  Initial nonce: ${pool.oracleNonce.toString()}`));
 
-  // PriceSource — mock for PoC
-  const source = new MockPriceSource({
-    basePrice: BigInt(pool.fairValue.toString()) || 100_000_000n,
-    stepBps: 5,
-    tickIntervalMs: 200,
-    spikeProb: 0.01,
-    spikeMagnitudeBps: 50,
+  // Resolve mint decimals — Pyth → fair_value conversion needs them. For
+  // the mock source they're harmless (it emits PRICE_SCALE units directly).
+  const [baseMintAcc, quoteMintAcc] = await Promise.all([
+    getMint(program.provider.connection, config.baseMint),
+    getMint(program.provider.connection, config.quoteMint),
+  ]);
+  console.log(
+    dim(`  Mint decimals: base=${baseMintAcc.decimals} quote=${quoteMintAcc.decimals}`)
+  );
+
+  // PriceSource — selected by env (PRICE_SOURCE=mock|pyth)
+  const source = createPriceSource({
+    kind: config.priceSource,
+    baseDecimals: baseMintAcc.decimals,
+    quoteDecimals: quoteMintAcc.decimals,
+    pollIntervalMs: config.priceSourcePollMs,
+    mockBasePrice: BigInt(pool.fairValue.toString()) || 100_000_000n,
+    pythFeedId: config.pythFeedId,
+    pythHermesUrl: config.pythHermesUrl,
   });
+  console.log(dim(`  Price source:  ${source.label}`));
+  if (config.priceSource === "mock") {
+    console.log(
+      yellow(`  WARNING: mock source — fair_value is a random walk, not real.`)
+    );
+  }
 
   const initialTick = await source.current();
 

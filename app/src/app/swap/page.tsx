@@ -2,7 +2,12 @@
 
 import * as React from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import {
+  ComputeBudgetProgram,
+  PublicKey,
+  Transaction,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import { BN } from "@cipher-quants/sdk";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Buffer } from "buffer";
@@ -41,6 +46,13 @@ import {
 } from "@/lib/utils";
 
 const DEFAULT_SLIPPAGE_BPS = 50;
+
+// Priority-fee defaults (microLamports per CU).
+//   0     → no compute-unit-price ix (cheapest, lowest landing odds)
+//   1_000 → ~1× SOL-fee uplift at ~50 k CU per swap; safe devnet default
+// During contested mainnet slots, 50_000 (≈ keeper Mode A) is a reasonable
+// floor for RFQ swaps where landing in-slot matters.
+const DEFAULT_PRIORITY_FEE_MICROLAMPORTS = 1_000;
 
 export default function SwapPage() {
   const { publicKey, sendTransaction } = useWallet();
@@ -89,8 +101,27 @@ export default function SwapPage() {
   const outputDecimals = direction === "buy" ? baseDecimals : quoteDecimals;
   const [inputAmount, setInputAmount] = React.useState<string>("");
   const [slippageBps, setSlippageBps] = React.useState<string>(String(DEFAULT_SLIPPAGE_BPS));
+  const [priorityFee, setPriorityFee] = React.useState<string>(
+    String(DEFAULT_PRIORITY_FEE_MICROLAMPORTS)
+  );
   const [submitting, setSubmitting] = React.useState<boolean>(false);
   const [vaultReserves, setVaultReserves] = React.useState<{ base: bigint; quote: bigint } | null>(null);
+
+  // Priority-fee validation. Rejects non-numeric and absurd values; accepts 0
+  // (skip the compute-unit-price ix entirely).
+  const priorityFeeValidation = React.useMemo<
+    { ok: true; microLamports: number } | { ok: false; error: string }
+  >(() => {
+    const raw = priorityFee.trim();
+    if (raw === "") return { ok: true, microLamports: 0 };
+    const n = Number(raw);
+    if (!Number.isFinite(n) || !Number.isInteger(n))
+      return { ok: false, error: "Must be a non-negative integer" };
+    if (n < 0) return { ok: false, error: "Must be ≥ 0" };
+    // Soft upper bound: 1 SOL per million CU is already absurd. Catch fat fingers.
+    if (n > 10_000_000) return { ok: false, error: "Refusing > 10M µL/CU" };
+    return { ok: true, microLamports: n };
+  }, [priorityFee]);
 
   // Read vault balances on pool change (for client-side simulate)
   React.useEffect(() => {
@@ -211,6 +242,16 @@ export default function SwapPage() {
       const [quoteVault] = deriveVault(poolAddress, quoteMint, signingProgram.programId);
 
       const tx = new Transaction();
+
+      // Prepend compute-unit-price ix when the user opted in (>0). 0 means
+      // "let the validator pick" — fine for cheap clusters / dev.
+      if (priorityFeeValidation.ok && priorityFeeValidation.microLamports > 0) {
+        tx.add(
+          ComputeBudgetProgram.setComputeUnitPrice({
+            microLamports: priorityFeeValidation.microLamports,
+          })
+        );
+      }
 
       if (freshness.isFresh) {
         // Curve path
@@ -446,21 +487,45 @@ export default function SwapPage() {
               <Stat label="Mode TTL" value={pool ? `${pool.state.currentModeTtl} slots` : "—"} />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="slippage">Slippage (bps)</Label>
-              <Input
-                id="slippage"
-                value={slippageBps}
-                onChange={(e) => setSlippageBps(e.target.value)}
-                placeholder="50"
-                inputMode="numeric"
-                aria-invalid={!slippageValidation.ok}
-              />
-              {!slippageValidation.ok && (
-                <div className="text-xs text-destructive">
-                  {slippageValidation.error}
-                </div>
-              )}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Label htmlFor="slippage">Slippage (bps)</Label>
+                <Input
+                  id="slippage"
+                  value={slippageBps}
+                  onChange={(e) => setSlippageBps(e.target.value)}
+                  placeholder="50"
+                  inputMode="numeric"
+                  aria-invalid={!slippageValidation.ok}
+                />
+                {!slippageValidation.ok && (
+                  <div className="text-xs text-destructive">
+                    {slippageValidation.error}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="priority-fee">
+                  Priority fee (µL/CU)
+                </Label>
+                <Input
+                  id="priority-fee"
+                  value={priorityFee}
+                  onChange={(e) => setPriorityFee(e.target.value)}
+                  placeholder="1000"
+                  inputMode="numeric"
+                  aria-invalid={!priorityFeeValidation.ok}
+                />
+                {!priorityFeeValidation.ok ? (
+                  <div className="text-xs text-destructive">
+                    {priorityFeeValidation.error}
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-muted-foreground">
+                    0 = none. Raise during congested slots.
+                  </div>
+                )}
+              </div>
             </div>
 
             <Button
@@ -472,7 +537,8 @@ export default function SwapPage() {
                 pool.state.paused ||
                 submitting ||
                 !simulation ||
-                !slippageValidation.ok
+                !slippageValidation.ok ||
+                !priorityFeeValidation.ok
               }
               onClick={() => void submitSwap()}
             >
