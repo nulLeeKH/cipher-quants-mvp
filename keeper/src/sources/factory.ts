@@ -1,24 +1,32 @@
 // ============================================================================
 // PriceSource factory
 // ============================================================================
-// Picks the concrete PriceSource implementation at boot. Driven by env vars
-// so the keeper can switch sources without code edits (TODO.md §1.4 — the
-// data-source abstraction layer that ships from day one).
+// Composes a PriceSource pipeline from environment-driven config.
+// TODO.md §1.4 — the data-source abstraction layer that ships from day one.
 //
-// Adding a new source:
+// Pipeline shape:
+//
+//   inner = primary source (mock | pyth)
+//     └─► (optional) wrapped with FailoverPriceSource if a fallback is set
+//           └─► (optional) wrapped with BasisAdjustedSource if BASIS_BPS != 0
+//                 └─► what the keeper consumes
+//
+// Adding a new adapter:
 //   1. Implement the PriceSource interface in sources/<name>.ts
-//   2. Add a case to createPriceSource() below.
-//   3. Document the env vars in keeper/.env.example.
+//   2. Add a case to createPrimarySource() below.
+//   3. Document its env vars in keeper/.env.example.
 
 import type { PriceSource } from "./types.ts";
 import { MockPriceSource } from "./mock.ts";
-import { PythPriceSource } from "./pyth.ts";
+import { PythPriceSource, type PythQuoteKind } from "./pyth.ts";
+import { BasisAdjustedSource } from "./basis.ts";
+import { FailoverPriceSource } from "./failover.ts";
 
 export type PriceSourceKind = "mock" | "pyth";
 
 export interface PriceSourceConfig {
   kind: PriceSourceKind;
-  /** Base mint decimals — used by adapters that convert human prices. */
+  /** Base mint decimals — adapters that convert human prices need them. */
   baseDecimals: number;
   quoteDecimals: number;
   /** Poll cadence (ms). Adapter-specific defaults apply when unset. */
@@ -33,9 +41,21 @@ export interface PriceSourceConfig {
   // ----- pyth options -----
   pythFeedId?: string;
   pythHermesUrl?: string;
+  /** `"sse"` (default) or `"poll"`. */
+  pythTransport?: "sse" | "poll";
+  /** `"spot"` (default) or `"ema"` for smoother price. */
+  pythQuoteKind?: PythQuoteKind;
+  /** Tick goes stale after this many seconds. Default 60. */
+  pythMaxStalenessSec?: number;
+
+  // ----- wrappers -----
+  /** Optional fallback source. Composed via FailoverPriceSource. */
+  fallback?: PriceSourceConfig;
+  /** Signed bps for underlying→tokenized adjustment. Default 0 (no-op). */
+  basisAdjustmentBps?: number;
 }
 
-export function createPriceSource(cfg: PriceSourceConfig): PriceSource {
+function createPrimarySource(cfg: PriceSourceConfig): PriceSource {
   switch (cfg.kind) {
     case "pyth": {
       if (!cfg.pythFeedId) {
@@ -50,6 +70,9 @@ export function createPriceSource(cfg: PriceSourceConfig): PriceSource {
         quoteDecimals: cfg.quoteDecimals,
         pollIntervalMs: cfg.pollIntervalMs,
         hermesUrl: cfg.pythHermesUrl,
+        transport: cfg.pythTransport,
+        quoteKind: cfg.pythQuoteKind,
+        maxStalenessSec: cfg.pythMaxStalenessSec,
       });
     }
     case "mock":
@@ -65,10 +88,37 @@ export function createPriceSource(cfg: PriceSourceConfig): PriceSource {
   }
 }
 
+export function createPriceSource(cfg: PriceSourceConfig): PriceSource {
+  let source: PriceSource = createPrimarySource(cfg);
+
+  // Fallback wrapper (only if explicitly configured).
+  if (cfg.fallback) {
+    const fallback = createPriceSource(cfg.fallback);
+    source = new FailoverPriceSource([source, fallback]);
+  }
+
+  // Basis adjustment (only if non-zero).
+  if (cfg.basisAdjustmentBps && cfg.basisAdjustmentBps !== 0) {
+    source = new BasisAdjustedSource(source, { basisBps: cfg.basisAdjustmentBps });
+  }
+
+  return source;
+}
+
 export function parsePriceSourceKind(raw: string | undefined): PriceSourceKind {
   const v = (raw ?? "mock").trim().toLowerCase();
   if (v === "mock" || v === "pyth") return v;
-  throw new Error(
-    `PRICE_SOURCE must be one of: mock | pyth (got "${raw}")`
-  );
+  throw new Error(`PRICE_SOURCE must be one of: mock | pyth (got "${raw}")`);
+}
+
+export function parsePythQuoteKind(raw: string | undefined): PythQuoteKind {
+  const v = (raw ?? "spot").trim().toLowerCase();
+  if (v === "spot" || v === "ema") return v;
+  throw new Error(`PYTH_QUOTE_KIND must be one of: spot | ema (got "${raw}")`);
+}
+
+export function parsePythTransport(raw: string | undefined): "sse" | "poll" {
+  const v = (raw ?? "sse").trim().toLowerCase();
+  if (v === "sse" || v === "poll") return v;
+  throw new Error(`PYTH_TRANSPORT must be one of: sse | poll (got "${raw}")`);
 }

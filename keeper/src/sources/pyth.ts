@@ -1,30 +1,49 @@
 // ============================================================================
-// PythPriceSource — Pyth Hermes REST adapter
+// PythPriceSource — Pyth Hermes adapter (REST polling + SSE streaming)
 // ============================================================================
 // docs/OPERATIONS.md §3.1, TODO.md §1 — first real (non-mock) price source.
 //
-// Hermes is Pyth Network's HTTP gateway over the Wormhole VAA stream:
-//   GET https://hermes.pyth.network/v2/updates/price/latest?ids[]=<feedId>
+// Pyth Hermes is the HTTP gateway over the Pyth Wormhole VAA stream:
+//   REST: GET  https://hermes.pyth.network/v2/updates/price/latest?ids[]=<id>
+//   SSE:  GET  https://hermes.pyth.network/v2/updates/price/stream?ids[]=<id>
 //
-// Free, no API key, no rate-limit headers. The keeper polls every
-// `pollIntervalMs` (default 1s; Pyth itself publishes at ~400ms cadence for
-// most feeds, so faster polling adds API load without new information).
+// Free, no API key. SSE is push-based (matches Pyth's ~400 ms publish cadence
+// without polling overhead) and is the right choice for production. Polling
+// is kept as a fallback for environments behind proxies that drop long-lived
+// connections.
 //
 // Feed IDs: https://pyth.network/developers/price-feed-ids
-//   BTC/USD       e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43
-//   SOL/USD       ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d
-//   AAPL/USD      49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688
+//   BTC/USD   e62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43
+//   SOL/USD   ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d
+//   AAPL/USD  49f6b65cb1de6b10eaf75e7c03ca029c306d0357e91b5311b175084a5ad55688
 //
-// Unit conversion (Pyth → on-chain fair_value):
+// ────────────────────────────────────────────────────────────────────────────
+// IMPORTANT — "underlying" vs "tokenized" price
+// ────────────────────────────────────────────────────────────────────────────
+// Pyth publishes the *underlying* asset price (NYSE AAPL, native BTC,
+// native SOL, etc.). For tokenized assets such as xStocks (Backed's AAPLx,
+// TSLAx, …) there is a basis (premium / discount, redemption cost, off-hours
+// drift) between the underlying and the on-chain token. This adapter does
+// NOT correct for that — basis adjustment is handled by `BasisAdjustedSource`
+// in `basis.ts`. The intended pipeline is:
 //
-//   human_price        = pyth_raw * 10^pyth_expo
-//   raw_quote_per_base = human_price * 10^quote_dec / 10^base_dec
-//   fair_value         = raw_quote_per_base * PRICE_SCALE
-//                      = pyth_raw * 10^(pyth_expo + quote_dec - base_dec + 6)
+//     PythPriceSource (underlying)
+//       └─► BasisAdjustedSource (basis bps, configurable / future-feed-driven)
+//             └─► keeper worker
 //
-// Done in integer bigint math to avoid float precision loss.
+// For PoC and crypto pairs (BTC/USDC, SOL/USDC) the basis is ~0; the wrapper
+// is a no-op and we can use this source directly. When trading xStocks the
+// basis must be set via env or a dynamic basis feed before going live.
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Staleness handling: Pyth equity feeds stop publishing outside US market
+// hours. `publish_time` becomes older than `maxStalenessSec`, at which point
+// we tag the tick as `"stale"`. The worker MUST refuse to push stale ticks
+// (would otherwise advertise an out-of-date curve as fresh on-chain).
 
-import type { PriceSource, PriceTick } from "./types.ts";
+import type { PriceSource, PriceTick, PriceTickStatus } from "./types.ts";
+
+export type PythQuoteKind = "spot" | "ema";
 
 export interface PythPriceSourceOpts {
   /** 64-char hex feed id (no leading 0x). */
@@ -33,12 +52,26 @@ export interface PythPriceSourceOpts {
   baseDecimals: number;
   /** Quote mint decimals. */
   quoteDecimals: number;
-  /** Poll cadence. Default 1000ms. Pyth publishes ~400ms; faster polling
-   *  doesn't yield new ticks. */
+  /**
+   * Transport: `"poll"` issues REST requests every `pollIntervalMs`, `"sse"`
+   * subscribes to the Hermes event stream. Default `"sse"` — push-based
+   * removes RTT from the Mode-A push budget.
+   */
+  transport?: "poll" | "sse";
+  /** Poll cadence (ms). Only used when transport = "poll". Default 1000. */
   pollIntervalMs?: number;
+  /** Use the EMA price (smoothed) instead of spot. Default false (spot). */
+  quoteKind?: PythQuoteKind;
+  /**
+   * Tick is `"stale"` when `now - publish_time > maxStalenessSec`. Defaults
+   * to 60 s — appropriate for crypto. For equity feeds (which freeze
+   * outside US market hours by design) this is *expected* off-hours and the
+   * worker should respond by holding Mode C.
+   */
+  maxStalenessSec?: number;
   /** Override the Hermes base URL (default https://hermes.pyth.network). */
   hermesUrl?: string;
-  /** RV rolling window (samples). Default 60 (= ~1 min at 1s poll). */
+  /** RV rolling window (samples). Default 60. */
   rvWindow?: number;
 }
 
@@ -59,21 +92,28 @@ interface HermesResponse {
   parsed?: HermesEntry[];
 }
 
-export class PythPriceSource implements PriceSource {
-  readonly label = "pyth";
+const INITIAL_TICK: PriceTick = {
+  fairValue: 0n,
+  confidenceBps: 0n,
+  realizedVolBps: 0n,
+  timestamp: 0,
+  status: "unknown",
+};
 
-  private current_: PriceTick = {
-    fairValue: 0n,
-    confidenceBps: 0n,
-    realizedVolBps: 0n,
-    timestamp: 0,
-  };
+export class PythPriceSource implements PriceSource {
+  readonly label: string;
+
+  private current_: PriceTick = INITIAL_TICK;
   private running = false;
-  private timer?: number;
+  private abort = new AbortController();
+  private pollTimer?: number;
   private recentHumanPrices: number[] = [];
-  private readonly url: string;
+  private readonly hermesBase: string;
+  private readonly transport: "poll" | "sse";
   private readonly pollMs: number;
   private readonly rvWindow: number;
+  private readonly maxStalenessMs: number;
+  private readonly quoteKind: PythQuoteKind;
 
   constructor(private opts: PythPriceSourceOpts) {
     if (!/^[0-9a-fA-F]{64}$/.test(opts.feedId)) {
@@ -84,38 +124,60 @@ export class PythPriceSource implements PriceSource {
     if (opts.baseDecimals < 0 || opts.quoteDecimals < 0) {
       throw new Error("PythPriceSource: decimals must be non-negative");
     }
-    const base = opts.hermesUrl ?? "https://hermes.pyth.network";
-    this.url = `${base}/v2/updates/price/latest?ids[]=${opts.feedId}`;
+    this.hermesBase = (opts.hermesUrl ?? "https://hermes.pyth.network").replace(/\/$/, "");
+    this.transport = opts.transport ?? "sse";
     this.pollMs = opts.pollIntervalMs ?? 1000;
     this.rvWindow = opts.rvWindow ?? 60;
+    this.maxStalenessMs = (opts.maxStalenessSec ?? 60) * 1000;
+    this.quoteKind = opts.quoteKind ?? "spot";
+    this.label = `pyth:${this.transport}:${this.quoteKind}`;
   }
 
   current(): Promise<PriceTick> {
-    return Promise.resolve(this.current_);
+    // On every read, refresh the staleness verdict against wall time. The
+    // underlying tick data doesn't change between fetches; only the
+    // staleness label can flip if the source went quiet.
+    return Promise.resolve(this.withFreshStatus(this.current_));
   }
 
   async start(): Promise<() => void> {
     if (this.running) return () => this.stop();
     this.running = true;
-    // Initial fetch — fail loudly if the feed is unreachable on boot so the
-    // operator notices immediately, instead of silently emitting fairValue=0.
-    await this.tick(/* throwOnError */ true);
-    this.timer = setInterval(() => void this.tick(false), this.pollMs);
+
+    if (this.transport === "poll") {
+      // Initial fetch — fail loudly so a misconfigured feed id surfaces at
+      // boot rather than producing fairValue=0 silently.
+      await this.pollOnce(/* throwOnError */ true);
+      this.pollTimer = setInterval(() => void this.pollOnce(false), this.pollMs);
+    } else {
+      // SSE: kick off the streaming loop in the background; do an initial
+      // REST fetch so `current()` returns a real value before the first
+      // server-sent event arrives.
+      await this.pollOnce(/* throwOnError */ true);
+      void this.runSseLoop();
+    }
     return () => this.stop();
   }
 
   private stop() {
-    if (this.timer !== undefined) clearInterval(this.timer);
     this.running = false;
+    this.abort.abort();
+    if (this.pollTimer !== undefined) clearInterval(this.pollTimer);
   }
 
-  private async tick(throwOnError: boolean): Promise<void> {
+  // ──────────────────────────────────────────────────────────────────────
+  // REST polling
+  // ──────────────────────────────────────────────────────────────────────
+
+  private async pollOnce(throwOnError: boolean): Promise<void> {
+    const url = `${this.hermesBase}/v2/updates/price/latest?ids[]=${this.opts.feedId}`;
     try {
-      const resp = await fetch(this.url, {
+      const resp = await fetch(url, {
         headers: { accept: "application/json" },
+        signal: this.abort.signal,
       });
       if (!resp.ok) {
-        const msg = `[pyth] HTTP ${resp.status} from ${this.url}`;
+        const msg = `[pyth] HTTP ${resp.status} from ${url}`;
         if (throwOnError) throw new Error(msg);
         console.warn(msg);
         return;
@@ -128,24 +190,128 @@ export class PythPriceSource implements PriceSource {
         console.warn(msg);
         return;
       }
-
-      const tick = this.entryToTick(entry);
-      this.current_ = tick;
+      this.current_ = this.entryToTick(entry);
     } catch (err) {
-      const msg = `[pyth] tick failed: ${(err as Error).message}`;
+      if (this.abort.signal.aborted) return;
+      const msg = `[pyth] poll failed: ${(err as Error).message}`;
       if (throwOnError) throw err;
       console.warn(msg);
     }
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // SSE streaming
+  // ──────────────────────────────────────────────────────────────────────
+  // Reconnects on disconnect / network blip with exponential backoff
+  // (capped at 30 s). The keeper outlives any single TCP connection.
+
+  private async runSseLoop(): Promise<void> {
+    const url = `${this.hermesBase}/v2/updates/price/stream?ids[]=${this.opts.feedId}`;
+    let backoffMs = 500;
+
+    while (this.running && !this.abort.signal.aborted) {
+      try {
+        const resp = await fetch(url, {
+          headers: { accept: "text/event-stream" },
+          signal: this.abort.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        backoffMs = 500; // reset on successful connect
+        await this.consumeSseStream(resp.body);
+        // Server closed the stream cleanly — loop and reconnect.
+        console.warn(`[pyth] SSE stream closed by server; reconnecting`);
+      } catch (err) {
+        if (this.abort.signal.aborted) return;
+        console.warn(
+          `[pyth] SSE error: ${(err as Error).message}; reconnect in ${backoffMs}ms`
+        );
+      }
+      // Backoff before reconnect, but wake up on abort.
+      await this.sleep(backoffMs);
+      backoffMs = Math.min(backoffMs * 2, 30_000);
+    }
+  }
+
+  private async consumeSseStream(body: ReadableStream<Uint8Array>): Promise<void> {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      while (this.running && !this.abort.signal.aborted) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        buf += decoder.decode(value, { stream: true });
+        // SSE framing: events separated by \n\n; each event is one or more
+        // `field: value` lines. We only care about `data:` payloads.
+        let idx: number;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of block.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (payload === "" || payload === "{}") continue;
+            try {
+              const parsed = JSON.parse(payload) as HermesResponse;
+              const entry = parsed.parsed?.[0];
+              if (entry) this.current_ = this.entryToTick(entry);
+            } catch {
+              // Malformed event — skip, don't blow up the stream.
+            }
+          }
+        }
+      }
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        this.abort.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(t);
+        resolve();
+      };
+      if (this.abort.signal.aborted) {
+        clearTimeout(t);
+        resolve();
+        return;
+      }
+      this.abort.signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Tick conversion
+  // ──────────────────────────────────────────────────────────────────────
+
   /** Visible for testing. */
   entryToTick(entry: HermesEntry): PriceTick {
-    const rawSigned = BigInt(entry.price.price);
-    if (rawSigned <= 0n) {
-      throw new Error(`[pyth] non-positive price: ${entry.price.price}`);
+    const src = this.quoteKind === "ema" ? entry.ema_price : entry.price;
+
+    // Pyth encodes "unknown" status as price <= 0 or conf == 0. Treat as
+    // halted — the feed exists but isn't reporting a usable number.
+    const rawSigned = BigInt(src.price);
+    if (rawSigned <= 0n || src.conf === "0") {
+      return {
+        ...INITIAL_TICK,
+        timestamp: src.publish_time * 1000,
+        status: "halted",
+      };
     }
-    const raw = rawSigned; // already positive
-    const expo = entry.price.expo;
+
+    const raw = rawSigned;
+    const expo = src.expo;
     const totalShift = expo + this.opts.quoteDecimals - this.opts.baseDecimals + 6;
     let fairValue: bigint;
     if (totalShift >= 0) {
@@ -154,13 +320,9 @@ export class PythPriceSource implements PriceSource {
       fairValue = raw / 10n ** BigInt(-totalShift);
     }
 
-    // Confidence as bps of price. conf and price share the same expo, so the
-    // ratio is exponent-free.
-    const conf = BigInt(entry.price.conf);
+    const conf = BigInt(src.conf);
     const confidenceBps = raw > 0n ? (conf * 10_000n) / raw : 0n;
 
-    // Realized vol: rolling mean of |return| over the last rvWindow samples.
-    // Float is fine here — this is a *signal* for mode switching, not money.
     const humanPrice = Number(raw) * Math.pow(10, expo);
     this.recentHumanPrices.push(humanPrice);
     if (this.recentHumanPrices.length > this.rvWindow) {
@@ -168,12 +330,26 @@ export class PythPriceSource implements PriceSource {
     }
     const rvBps = computeRollingRvBps(this.recentHumanPrices);
 
+    const tsMs = src.publish_time * 1000;
     return {
       fairValue,
       confidenceBps,
       realizedVolBps: BigInt(Math.round(rvBps)),
-      timestamp: entry.price.publish_time * 1000,
+      timestamp: tsMs,
+      // Status is computed against wall time at read time, not write time
+      // (see `current()`). Set the optimistic value here; downgrade later
+      // if `now - publish_time` exceeds the threshold.
+      status: "fresh",
     };
+  }
+
+  private withFreshStatus(tick: PriceTick): PriceTick {
+    if (tick.status === "unknown" || tick.status === "halted") return tick;
+    const age = Date.now() - tick.timestamp;
+    if (age > this.maxStalenessMs) {
+      return { ...tick, status: "stale" satisfies PriceTickStatus };
+    }
+    return tick;
   }
 }
 

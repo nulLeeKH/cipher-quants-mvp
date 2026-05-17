@@ -25,6 +25,23 @@
 // up a mismatched-decimal pair (e.g. SOL/USDC), introduce decimal-aware
 // conversion at that boundary.
 
+/**
+ * Tick freshness as reported by the underlying source.
+ *
+ *   "fresh"   — within the source's allowed staleness window; safe to push.
+ *   "stale"   — last known value is older than the source's freshness
+ *               threshold. Caller should NOT push as if it were fresh; mode
+ *               policy may force Mode C until a fresh tick arrives.
+ *   "halted"  — source reports the market/feed is explicitly halted
+ *               (auction, circuit breaker, equity holiday, etc.).
+ *   "unknown" — source has never produced a tick (initial boot, fetch
+ *               failure). `fairValue` is meaningless.
+ *
+ * Worker policy: push only when status == "fresh". Anything else is a
+ * signal to keep the on-chain curve stale (RFQ path takes over).
+ */
+export type PriceTickStatus = "fresh" | "stale" | "halted" | "unknown";
+
 export interface PriceTick {
   /** Fair value, raw_quote_per_raw_base × PRICE_SCALE (decimals-aware). */
   fairValue: bigint;
@@ -32,8 +49,11 @@ export interface PriceTick {
   confidenceBps: bigint;
   /** Realized volatility, 5-minute window (bps). 0 = unknown. */
   realizedVolBps: bigint;
-  /** Tick timestamp (ms since epoch) */
+  /** Tick timestamp (ms since epoch). For Pyth this is `publish_time`. */
   timestamp: number;
+  /** Source-reported freshness. Default `"fresh"` for sources that don't
+   *  expose a staleness signal (e.g. the deterministic mock). */
+  status: PriceTickStatus;
 }
 
 /**

@@ -1,7 +1,12 @@
 import "jsr:@std/dotenv/load";
 import { PublicKey } from "@solana/web3.js";
 
-import { parsePriceSourceKind } from "./sources/factory.ts";
+import {
+  parsePriceSourceKind,
+  parsePythQuoteKind,
+  parsePythTransport,
+} from "./sources/factory.ts";
+import type { PythQuoteKind } from "./sources/pyth.ts";
 
 // ============================================================================
 // Keeper Configuration
@@ -38,15 +43,28 @@ export interface KeeperConfig {
   quoteMint?: PublicKey;
 
   // ----- Price source (driven by PRICE_SOURCE env) -----
-  /** `mock` (default) — random walk. `pyth` — Pyth Hermes REST adapter. */
+  /** `mock` (default) — random walk. `pyth` — Pyth Hermes REST/SSE adapter. */
   priceSource: "mock" | "pyth";
   /** 64-char hex feed id; required when priceSource = "pyth".
    *  See https://pyth.network/developers/price-feed-ids */
   pythFeedId?: string;
   /** Override the Hermes base URL (default https://hermes.pyth.network). */
   pythHermesUrl?: string;
-  /** Source poll cadence (ms). Adapter default applies when unset. */
+  /** "sse" (default) or "poll". SSE is push-based and avoids the polling RTT
+   *  budget hit during Mode A. */
+  pythTransport: "sse" | "poll";
+  /** "spot" (default) or "ema" — Pyth's smoothed price; less reactive but
+   *  more robust to single-publisher noise. */
+  pythQuoteKind: PythQuoteKind;
+  /** Tick is "stale" after this many seconds without a publish_time update.
+   *  Default 60s (matches Pyth's crypto cadence; equity feeds will trip
+   *  this after-hours and the worker holds Mode C — that's correct). */
+  pythMaxStalenessSec?: number;
+  /** Source poll cadence (ms). Used only when pythTransport = "poll". */
   priceSourcePollMs?: number;
+  /** Signed bps. Adjusts underlying → tokenized (e.g. xStock premium).
+   *  0 = no adjustment. ±5000 hard cap. */
+  basisAdjustmentBps: number;
 
   // ----- Oracle worker timing (ms) -----
   /** Mode A push interval (PoC default 200ms — OPERATIONS §1). */
@@ -126,9 +144,18 @@ export function loadConfig(args: Record<string, unknown>): KeeperConfig {
     priceSource: parsePriceSourceKind(Deno.env.get("PRICE_SOURCE")),
     pythFeedId: Deno.env.get("PYTH_FEED_ID"),
     pythHermesUrl: Deno.env.get("PYTH_HERMES_URL"),
+    pythTransport: parsePythTransport(Deno.env.get("PYTH_TRANSPORT")),
+    pythQuoteKind: parsePythQuoteKind(Deno.env.get("PYTH_QUOTE_KIND")),
+    pythMaxStalenessSec: Deno.env.get("PYTH_MAX_STALENESS_SEC")
+      ? parseInt(Deno.env.get("PYTH_MAX_STALENESS_SEC")!, 10)
+      : undefined,
     priceSourcePollMs: Deno.env.get("PRICE_SOURCE_POLL_MS")
       ? parseInt(Deno.env.get("PRICE_SOURCE_POLL_MS")!, 10)
       : undefined,
+    basisAdjustmentBps: parseInt(
+      envOptional("BASIS_ADJUSTMENT_BPS", "0"),
+      10
+    ),
 
     oracleModeAPushIntervalMs: parseInt(
       envOptional("ORACLE_MODE_A_PUSH_INTERVAL_MS", "200"),

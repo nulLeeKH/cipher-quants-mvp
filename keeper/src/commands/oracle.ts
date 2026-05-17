@@ -15,9 +15,9 @@ const sdkAccounts = require("../../../sdk/dist/accounts/index.js") as any;
 // ============================================================================
 // `keeper oracle` — start oracle worker loop
 // ============================================================================
-// PoC: MockPriceSource (random walk). Real data sources (Finnhub, Pyth, ...)
-// are tracked in TODO.md §1 — wire up the concrete PriceSource implementation
-// right before entering Stage 1.
+// Mode A/B/C decisions are made by the worker using ticks from the configured
+// PriceSource. The source pipeline (primary | failover | basis adjustment)
+// is assembled in sources/factory.ts from env vars.
 
 export async function runOracle(
   config: KeeperConfig,
@@ -54,7 +54,7 @@ export async function runOracle(
     dim(`  Mint decimals: base=${baseMintAcc.decimals} quote=${quoteMintAcc.decimals}`)
   );
 
-  // PriceSource — selected by env (PRICE_SOURCE=mock|pyth)
+  // PriceSource — composed by env (PRICE_SOURCE + BASIS_ADJUSTMENT_BPS + …)
   const source = createPriceSource({
     kind: config.priceSource,
     baseDecimals: baseMintAcc.decimals,
@@ -63,11 +63,23 @@ export async function runOracle(
     mockBasePrice: BigInt(pool.fairValue.toString()) || 100_000_000n,
     pythFeedId: config.pythFeedId,
     pythHermesUrl: config.pythHermesUrl,
+    pythTransport: config.pythTransport,
+    pythQuoteKind: config.pythQuoteKind,
+    pythMaxStalenessSec: config.pythMaxStalenessSec,
+    basisAdjustmentBps: config.basisAdjustmentBps,
   });
   console.log(dim(`  Price source:  ${source.label}`));
   if (config.priceSource === "mock") {
     console.log(
       yellow(`  WARNING: mock source — fair_value is a random walk, not real.`)
+    );
+  }
+  if (config.priceSource === "pyth" && config.basisAdjustmentBps === 0) {
+    // Pyth gives the underlying asset price. For tokenized assets (xStocks)
+    // there's a basis; running with 0 implies the operator has decided the
+    // basis is negligible (e.g. crypto pairs).
+    console.log(
+      dim(`  Note: BASIS_ADJUSTMENT_BPS=0 — treating underlying price as tokenized.`)
     );
   }
 

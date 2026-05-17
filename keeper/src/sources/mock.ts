@@ -35,6 +35,7 @@ export class MockPriceSource implements PriceSource {
       confidenceBps: 0n,
       realizedVolBps: 0n,
       timestamp: Date.now(),
+      status: "fresh",
     };
   }
 
@@ -83,6 +84,7 @@ export class MockPriceSource implements PriceSource {
       confidenceBps: BigInt(Math.round(rv / 2)),
       realizedVolBps: BigInt(Math.round(rv)),
       timestamp: Date.now(),
+      status: "fresh",
     };
   }
 }

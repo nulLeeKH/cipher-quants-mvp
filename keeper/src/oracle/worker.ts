@@ -111,9 +111,24 @@ export async function startOracleWorker(
   // Update source ticks in the background.
   const sourceStop = await source.start();
 
-  // Helper: build + send update_oracle ix
-  async function pushOracle(forcedMode?: "A" | "B" | "C"): Promise<void> {
+  // Helper: build + send update_oracle ix.
+  // Refuses to push when the source-reported tick status is anything other
+  // than "fresh". Pushing a stale/halted/unknown price would advertise an
+  // out-of-date curve to on-chain swaps; we'd rather hold whatever the
+  // chain has and let TTL run out into Mode C.
+  async function pushOracle(forcedMode?: "A" | "B" | "C"): Promise<boolean> {
     const tick = await source.current();
+    if (tick.status !== "fresh") {
+      console.warn(
+        yellow(
+          `  [oracle] skipping push — source tick status=${tick.status} ` +
+            `(label=${source.label}, age=${
+              Date.now() - tick.timestamp
+            }ms). Holding existing on-chain curve.`
+        )
+      );
+      return false;
+    }
     const mode = forcedMode ?? state.currentMode;
     const ttl = modeToTtl(mode);
 
@@ -170,6 +185,7 @@ export async function startOracleWorker(
           )
         );
       }
+      return true;
     } catch (err) {
       consecutiveFailures += 1;
       console.error(
@@ -178,13 +194,38 @@ export async function startOracleWorker(
         )
       );
       // Counter is NOT advanced — the next attempt will reuse the same nonce.
+      return false;
+    }
+  }
+
+  // Stale-tick policy: if the source stays non-fresh for a window, force
+  // Mode C so RFQ takes over. This handles "Pyth equity feed after NYSE
+  // close" and "Hermes endpoint degraded" the same way.
+  const STALE_FORCE_MODE_C_AFTER_MS = 30_000;
+  let firstStaleObservedAt: number | null = null;
+  function notePush(ok: boolean): void {
+    if (ok) {
+      firstStaleObservedAt = null;
+      return;
+    }
+    if (firstStaleObservedAt === null) firstStaleObservedAt = Date.now();
+    const elapsed = Date.now() - firstStaleObservedAt;
+    if (elapsed > STALE_FORCE_MODE_C_AFTER_MS && state.currentMode !== "C") {
+      console.warn(
+        yellow(
+          `  [oracle] source non-fresh for ${(elapsed / 1000).toFixed(0)}s → forcing Mode C`
+        )
+      );
+      state.currentMode = "C";
+      state.lastPushedTtl = 0;
+      lastChangeAt = Date.now();
     }
   }
 
   // Main loop
   (async () => {
     // Initial push (Mode C runs this only once — TTL=0 set).
-    await pushOracle();
+    notePush(await pushOracle());
 
     while (running) {
       // Cycle start. We must subtract push latency from the sleep so the real
@@ -224,18 +265,18 @@ export async function startOracleWorker(
         console.log(
           bold(cyan(`  [oracle] mode change ${state.currentMode} → ${nextMode}`))
         );
-        await pushOracle(nextMode);
+        notePush(await pushOracle(nextMode));
         lastChangeAt = Date.now();
       } else if (state.currentMode === "A") {
         // Aggressive: push every interval.
-        await pushOracle();
+        notePush(await pushOracle());
       } else if (state.currentMode === "B") {
         // Reactive: push only when thresholds are exceeded.
         if (
           Number(tick.realizedVolBps) > 50 ||
           Math.abs(nbbo30sMoveBps) > 5
         ) {
-          await pushOracle();
+          notePush(await pushOracle());
         }
       }
       // Mode C: sleep — no push.

@@ -43,26 +43,53 @@ per-cluster branching from `build.sh`. The same `.so` ships to
 localnet / devnet / mainnet. If divergent behaviour is ever needed,
 re-introduce a feature and gate the actual code path in the same commit.
 
-### 1.2 PriceSource adapter ✅ shipped (Pyth Hermes), 🟡 production sources deferred
+### 1.2 PriceSource architecture ✅ shipped (Pyth Hermes + composable wrappers)
 
 Was: keeper's only price source was `MockPriceSource` — a random walk +
 spike. Acceptable for localnet, but Stage 2 exit gates around
 cancel-priority and `p95 ≤ 250 ms` can't be measured against random data.
 
-Resolution: introduced a `PriceSource` factory
-([keeper/src/sources/factory.ts](../keeper/src/sources/factory.ts)) and a
-real `PythPriceSource` adapter
-([keeper/src/sources/pyth.ts](../keeper/src/sources/pyth.ts)) over Pyth's
-free [Hermes REST endpoint](https://hermes.pyth.network). Selected at boot
-via `PRICE_SOURCE=mock|pyth` + `PYTH_FEED_ID`. Mint decimals are read from
-chain on startup so the on-chain `fair_value` (raw_quote/raw_base ×
-PRICE_SCALE) is computed correctly across mismatched-decimal pairs.
+Resolution: a layered `PriceSource` pipeline assembled by
+[keeper/src/sources/factory.ts](../keeper/src/sources/factory.ts):
 
-🟡 Deferred until Stage 2 exit: the PoC-locked combo of Finnhub free +
-Yahoo unofficial ([TODO.md §1](../TODO.md)). Pyth covers BTC / SOL /
-xStocks underlyings (AAPL, TSLA, etc.) which is sufficient for devnet
-entry; the Finnhub adapter only matters if Pyth's xStocks coverage proves
-insufficient.
+```
+  primary (mock | pyth)
+    └─► FailoverPriceSource (optional)  ←  multi-source priority
+          └─► BasisAdjustedSource (optional)  ←  underlying → tokenized
+                └─► keeper worker
+```
+
+Concrete pieces shipped:
+
+- **`PythPriceSource`** ([sources/pyth.ts](../keeper/src/sources/pyth.ts)) — Pyth Hermes adapter with:
+  - **SSE streaming** as the default transport (`PYTH_TRANSPORT=sse`),
+    push-based and free of polling RTT. Polling kept as a fallback.
+    Auto-reconnects with exponential backoff on disconnect.
+  - **Staleness detection** — `now − publish_time > PYTH_MAX_STALENESS_SEC`
+    tags the tick `stale`. Equity feeds will trip this after-hours by
+    design; the worker holds Mode C.
+  - **Halted/unknown handling** — `price ≤ 0` or `conf == 0` are tagged
+    `halted`. The worker refuses to push.
+  - **EMA option** (`PYTH_QUOTE_KIND=ema`) — Pyth-smoothed price, less
+    reactive but more robust to single-publisher noise.
+- **`BasisAdjustedSource`** ([sources/basis.ts](../keeper/src/sources/basis.ts)) —
+  Pyth publishes the *underlying* (NYSE AAPL, native BTC). Tokenized
+  assets (xStocks etc.) have a basis. The wrapper multiplies fair_value
+  by `(10_000 + BASIS_ADJUSTMENT_BPS) / 10_000`. Default `0` is a no-op
+  (correct for crypto pairs). When a dynamic basis feed becomes
+  available, replace the constant — the worker code path is unchanged.
+- **`FailoverPriceSource`** ([sources/failover.ts](../keeper/src/sources/failover.ts)) —
+  Multi-source priority. `current()` walks the list and returns the
+  first fresh tick; degrades to the least-bad available status if all
+  are non-fresh. Wrapped above by composition (`cfg.fallback`).
+- **`PriceTick.status`** — every tick now carries
+  `"fresh" | "stale" | "halted" | "unknown"`. The worker refuses to push
+  anything but `"fresh"`, and after 30 s of consecutive non-fresh ticks
+  it force-downgrades to Mode C so RFQ takes over.
+
+🟡 Still deferred until Stage 2 exit: a second concrete adapter (Finnhub
+free / Yahoo unofficial — TODO.md §1). The Failover scaffold is in place
+so adding one is a one-file change.
 
 ### 1.3 Two-step admin rotation ✅ resolved
 
