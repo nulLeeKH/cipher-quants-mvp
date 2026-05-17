@@ -22,6 +22,10 @@ import type { KeeperProgram } from "../program.ts";
 import type { PriceSource } from "../sources/types.ts";
 import { DEFAULT_THRESHOLDS, decideMode, modeToTtl } from "./mode.ts";
 import type { OracleSharedState } from "./state.ts";
+import {
+  DEFAULT_STALE_HOLDOFF_MS,
+  evaluateStalePolicy,
+} from "./stale_policy.ts";
 
 export interface OracleWorkerOpts {
   config: KeeperConfig;
@@ -198,24 +202,23 @@ export async function startOracleWorker(
     }
   }
 
-  // Stale-tick policy: if the source stays non-fresh for a window, force
-  // Mode C so RFQ takes over. This handles "Pyth equity feed after NYSE
-  // close" and "Hermes endpoint degraded" the same way.
-  const STALE_FORCE_MODE_C_AFTER_MS = 30_000;
+  // Stale-tick policy: see oracle/stale_policy.ts for the pure decision
+  // function (which is unit-tested). The worker just persists the
+  // observation window and applies the verdict.
   let firstStaleObservedAt: number | null = null;
   function notePush(ok: boolean): void {
-    if (ok) {
-      firstStaleObservedAt = null;
-      return;
-    }
-    if (firstStaleObservedAt === null) firstStaleObservedAt = Date.now();
-    const elapsed = Date.now() - firstStaleObservedAt;
-    if (elapsed > STALE_FORCE_MODE_C_AFTER_MS && state.currentMode !== "C") {
-      console.warn(
-        yellow(
-          `  [oracle] source non-fresh for ${(elapsed / 1000).toFixed(0)}s → forcing Mode C`
-        )
-      );
+    const outcome = evaluateStalePolicy(
+      {
+        pushed: ok,
+        firstStaleObservedAt,
+        holdoffMs: DEFAULT_STALE_HOLDOFF_MS,
+        alreadyModeC: state.currentMode === "C",
+      },
+      Date.now(),
+    );
+    firstStaleObservedAt = outcome.firstStaleObservedAt;
+    if (outcome.forceModeC) {
+      console.warn(yellow(`  [oracle] ${outcome.message}`));
       state.currentMode = "C";
       state.lastPushedTtl = 0;
       lastChangeAt = Date.now();

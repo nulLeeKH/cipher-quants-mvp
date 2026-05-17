@@ -38,7 +38,13 @@
     "typescript": "^5.7.3"
   },
   "jest": {
-    "testTimeout": 180000
+    "testTimeout": 180000,
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/keeper/",
+      "/api/",
+      "/app/"
+    ]
   },
   "pnpm": {
     "neverBuiltDependencies": ["@stellar/stellar-sdk"]

@@ -75,21 +75,105 @@ export interface PythPriceSourceOpts {
   rvWindow?: number;
 }
 
-interface HermesPriceField {
+export interface HermesPriceField {
   price: string;        // signed integer string
   conf: string;         // unsigned integer string
   expo: number;         // signed; usually negative (e.g. -8)
   publish_time: number; // unix seconds
 }
 
-interface HermesEntry {
+export interface HermesEntry {
   id: string;
   price: HermesPriceField;
   ema_price: HermesPriceField;
 }
 
-interface HermesResponse {
+export interface HermesResponse {
   parsed?: HermesEntry[];
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Pure helpers — exported so the test suite can hit them without a network or
+// a class instance. The class below composes these into the production flow.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Convert a Pyth raw price (`raw × 10^expo` = human price) to the on-chain
+ * `fair_value` encoding (`raw_quote_per_raw_base × PRICE_SCALE`).
+ *
+ *   fair_value = raw × 10^(expo + quoteDecimals - baseDecimals + log10(PRICE_SCALE))
+ *
+ * Both directions of the exponent shift are handled in bigint to avoid float
+ * loss. Throws on `raw <= 0` — that's a halted-feed signal, not a usable
+ * price; the caller decides how to surface it.
+ */
+export function pythRawToFairValue(
+  raw: bigint,
+  expo: number,
+  baseDecimals: number,
+  quoteDecimals: number,
+  priceScaleExp = 6, // PRICE_SCALE = 1e6 → log10 = 6
+): bigint {
+  if (raw <= 0n) {
+    throw new Error(`pythRawToFairValue: raw must be > 0, got ${raw}`);
+  }
+  const totalShift = expo + quoteDecimals - baseDecimals + priceScaleExp;
+  if (totalShift >= 0) {
+    return raw * 10n ** BigInt(totalShift);
+  }
+  return raw / 10n ** BigInt(-totalShift);
+}
+
+/**
+ * Re-evaluate the freshness label of a tick against the wall clock at read
+ * time. Pure function — `now` is injected so tests don't depend on system
+ * time. Halted/unknown statuses are preserved.
+ */
+export function applyStaleness(
+  tick: PriceTick,
+  maxStalenessMs: number,
+  now: number,
+): PriceTick {
+  if (tick.status === "unknown" || tick.status === "halted") return tick;
+  const age = now - tick.timestamp;
+  if (age > maxStalenessMs) {
+    return { ...tick, status: "stale" satisfies PriceTickStatus };
+  }
+  return { ...tick, status: "fresh" satisfies PriceTickStatus };
+}
+
+/**
+ * Pull complete SSE events (delimited by `\n\n`) out of an arbitrarily-chunked
+ * byte stream. Returns the parsed Hermes entries found plus the trailing
+ * partial-event tail to prepend on the next call.
+ *
+ * SSE framing (RFC-aligned subset Hermes uses): one or more `field: value`
+ * lines per event, blank line terminates. We only care about `data:` lines
+ * whose payload is JSON shaped like `{ parsed: [HermesEntry, ...] }`.
+ */
+export function parseSseChunk(
+  buffer: string,
+): { entries: HermesEntry[]; remaining: string } {
+  const entries: HermesEntry[] = [];
+  let cursor = 0;
+  while (true) {
+    const sep = buffer.indexOf("\n\n", cursor);
+    if (sep === -1) break;
+    const block = buffer.slice(cursor, sep);
+    cursor = sep + 2;
+    for (const line of block.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (payload === "" || payload === "{}") continue;
+      try {
+        const parsed = JSON.parse(payload) as HermesResponse;
+        if (parsed.parsed) entries.push(...parsed.parsed);
+      } catch {
+        // Malformed event — skip silently rather than crash the stream loop.
+      }
+    }
+  }
+  return { entries, remaining: buffer.slice(cursor) };
 }
 
 const INITIAL_TICK: PriceTick = {
@@ -243,24 +327,10 @@ export class PythPriceSource implements PriceSource {
         const { value, done } = await reader.read();
         if (done) return;
         buf += decoder.decode(value, { stream: true });
-        // SSE framing: events separated by \n\n; each event is one or more
-        // `field: value` lines. We only care about `data:` payloads.
-        let idx: number;
-        while ((idx = buf.indexOf("\n\n")) !== -1) {
-          const block = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          for (const line of block.split("\n")) {
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (payload === "" || payload === "{}") continue;
-            try {
-              const parsed = JSON.parse(payload) as HermesResponse;
-              const entry = parsed.parsed?.[0];
-              if (entry) this.current_ = this.entryToTick(entry);
-            } catch {
-              // Malformed event — skip, don't blow up the stream.
-            }
-          }
+        const { entries, remaining } = parseSseChunk(buf);
+        buf = remaining;
+        for (const entry of entries) {
+          this.current_ = this.entryToTick(entry);
         }
       }
     } finally {
@@ -295,65 +365,58 @@ export class PythPriceSource implements PriceSource {
   // Tick conversion
   // ──────────────────────────────────────────────────────────────────────
 
-  /** Visible for testing. */
+  /**
+   * Convert a Hermes entry into a PriceTick. Visible for testing.
+   *
+   * Mutates `recentHumanPrices` to maintain the rolling RV window — call
+   * `pythRawToFairValue` directly if you need a side-effect-free conversion.
+   */
   entryToTick(entry: HermesEntry): PriceTick {
     const src = this.quoteKind === "ema" ? entry.ema_price : entry.price;
+    const tsMs = src.publish_time * 1000;
 
-    // Pyth encodes "unknown" status as price <= 0 or conf == 0. Treat as
-    // halted — the feed exists but isn't reporting a usable number.
+    // Pyth encodes "unknown" / halted as price <= 0 or conf == 0. The feed
+    // exists but isn't producing a usable number — surface that explicitly.
     const rawSigned = BigInt(src.price);
     if (rawSigned <= 0n || src.conf === "0") {
-      return {
-        ...INITIAL_TICK,
-        timestamp: src.publish_time * 1000,
-        status: "halted",
-      };
+      return { ...INITIAL_TICK, timestamp: tsMs, status: "halted" };
     }
 
     const raw = rawSigned;
-    const expo = src.expo;
-    const totalShift = expo + this.opts.quoteDecimals - this.opts.baseDecimals + 6;
-    let fairValue: bigint;
-    if (totalShift >= 0) {
-      fairValue = raw * 10n ** BigInt(totalShift);
-    } else {
-      fairValue = raw / 10n ** BigInt(-totalShift);
-    }
+    const fairValue = pythRawToFairValue(
+      raw,
+      src.expo,
+      this.opts.baseDecimals,
+      this.opts.quoteDecimals,
+    );
 
     const conf = BigInt(src.conf);
-    const confidenceBps = raw > 0n ? (conf * 10_000n) / raw : 0n;
+    const confidenceBps = (conf * 10_000n) / raw;
 
-    const humanPrice = Number(raw) * Math.pow(10, expo);
+    const humanPrice = Number(raw) * Math.pow(10, src.expo);
     this.recentHumanPrices.push(humanPrice);
     if (this.recentHumanPrices.length > this.rvWindow) {
       this.recentHumanPrices.shift();
     }
     const rvBps = computeRollingRvBps(this.recentHumanPrices);
 
-    const tsMs = src.publish_time * 1000;
     return {
       fairValue,
       confidenceBps,
       realizedVolBps: BigInt(Math.round(rvBps)),
       timestamp: tsMs,
-      // Status is computed against wall time at read time, not write time
-      // (see `current()`). Set the optimistic value here; downgrade later
-      // if `now - publish_time` exceeds the threshold.
+      // Optimistic at write time; `current()` re-evaluates against wall
+      // clock via `applyStaleness` before returning to the caller.
       status: "fresh",
     };
   }
 
   private withFreshStatus(tick: PriceTick): PriceTick {
-    if (tick.status === "unknown" || tick.status === "halted") return tick;
-    const age = Date.now() - tick.timestamp;
-    if (age > this.maxStalenessMs) {
-      return { ...tick, status: "stale" satisfies PriceTickStatus };
-    }
-    return tick;
+    return applyStaleness(tick, this.maxStalenessMs, Date.now());
   }
 }
 
-function computeRollingRvBps(prices: number[]): number {
+export function computeRollingRvBps(prices: number[]): number {
   if (prices.length < 2) return 0;
   let sumAbsRetBps = 0;
   let n = 0;

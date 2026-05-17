@@ -105,20 +105,28 @@ export function createPriceSource(cfg: PriceSourceConfig): PriceSource {
   return source;
 }
 
+// Env-string parsers — treat both `undefined` and empty / whitespace as
+// "use the default". A user who writes `PRICE_SOURCE=` in their .env
+// almost certainly means "default" rather than "fail".
+function normalise(raw: string | undefined, fallback: string): string {
+  const v = (raw ?? "").trim().toLowerCase();
+  return v === "" ? fallback : v;
+}
+
 export function parsePriceSourceKind(raw: string | undefined): PriceSourceKind {
-  const v = (raw ?? "mock").trim().toLowerCase();
+  const v = normalise(raw, "mock");
   if (v === "mock" || v === "pyth") return v;
   throw new Error(`PRICE_SOURCE must be one of: mock | pyth (got "${raw}")`);
 }
 
 export function parsePythQuoteKind(raw: string | undefined): PythQuoteKind {
-  const v = (raw ?? "spot").trim().toLowerCase();
+  const v = normalise(raw, "spot");
   if (v === "spot" || v === "ema") return v;
   throw new Error(`PYTH_QUOTE_KIND must be one of: spot | ema (got "${raw}")`);
 }
 
 export function parsePythTransport(raw: string | undefined): "sse" | "poll" {
-  const v = (raw ?? "sse").trim().toLowerCase();
+  const v = normalise(raw, "sse");
   if (v === "sse" || v === "poll") return v;
   throw new Error(`PYTH_TRANSPORT must be one of: sse | poll (got "${raw}")`);
 }
