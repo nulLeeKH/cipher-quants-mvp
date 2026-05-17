@@ -50,7 +50,9 @@ pnpm install
 pnpm sdk:build                  # SDK → sdk/dist/
 
 # 3. Run integration tests (spawns its own validator)
-pnpm test                       # 49 tests; ~30s
+pnpm test                       # integration suite (96 tests, ~100 s)
+pnpm test:unit                  # all unit suites (keeper + api + sdk + app, ~6 s, no validator)
+pnpm test:all                   # both of the above, end-to-end
 
 # 4. Run Rust unit tests (math + Borsh parity, <1s)
 cargo test -p protocol --lib
@@ -83,9 +85,9 @@ pnpm app:dev                    # Next.js admin + swap UI
 ├── app/                   # Next.js frontend (Wallet Adapter + RFQ + curve sim)
 ├── keeper/                # Deno oracle pusher
 ├── api/                   # Deno RFQ webhook (JupiterZ-compatible)
-├── tests/                 # Jest integration suite (49 cases)
+├── tests/                 # Jest integration suite (96 cases)
 ├── scripts/               # build / test / validator / measure-cu
-├── docs/                  # SPECIFICATION + ARCHITECTURE + OPERATIONS + INCIDENT + PERFORMANCE
+├── docs/                  # SPEC + ARCH + OPS + CORE + DEPLOYMENT + INCIDENT_RESPONSE + PERFORMANCE
 └── CLAUDE.md              # AI-agent operating manual (read first)
 ```
 
@@ -115,9 +117,11 @@ Recommended workflow:
 ## Build for different networks
 
 ```bash
-./scripts/build.sh mainnet      # default — clean release build
-./scripts/build.sh devnet       # `--features devnet` (extended oracle staleness)
-./scripts/build.sh localnet     # same as mainnet today; kept as a separate hook
+./scripts/build.sh              # default — clean release build
+./scripts/build.sh <label>      # same .so, label is a log tag only; no per-cluster
+                                # cfg gates today. Reintroduce a Cargo feature
+                                # here and in Cargo.toml in the same commit if
+                                # divergent behaviour is ever needed.
 ```
 
 The `mainnet` build is what gets deployed. The script prints program size and

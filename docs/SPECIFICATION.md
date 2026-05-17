@@ -269,6 +269,33 @@ pub struct SignedQuoteMessage {
 > library (Borsh) and field order**. Any mismatch fails verification with
 > `QuoteSignatureInvalid` (code 6306).
 
+### 2.5 `AdminRotationProposal` (2-step admin rotation PDA account)
+
+```rust
+// Borsh-encoded account, 8-byte tag discriminator at offset 0
+pub struct AdminRotationProposal {
+    pub pool: Pubkey,         // Which pool this proposal belongs to.
+    pub proposed_by: Pubkey,  // Admin who created it (snapshot for ProposalStale).
+    pub new_admin: Pubkey,    // Pubkey that must sign accept_admin to take over.
+    pub created_slot: u64,    // For audit / staleness diagnostics.
+    pub bump: u8,
+    pub _reserved: [u8; 7],
+}
+```
+
+- **PDA seeds**: `[b"admin_proposal", pool]` — at most one outstanding
+  proposal per pool (PDA collision blocks a second `propose_admin` until
+  the existing one is accepted or cancelled).
+- **Lifecycle**:
+  - `propose_admin` allocates the account (current admin pays rent).
+  - `accept_admin` closes it (rent → new admin, pool.admin updates).
+  - `cancel_admin_proposal` closes it (rent → current admin, pool.admin unchanged).
+- **`ProposalStale` defense (code 6110)**: `accept_admin` rejects the
+  proposal if `pool.admin != proposal.proposed_by`. Prevents a stale
+  proposal from completing after the current admin has changed via the
+  irreversible single-step `rotate_admin` (or via a prior accept-cancel
+  race).
+
 ### 2.4 `QuoteNonceMarker` (replay-guard PDA account)
 
 ```rust
@@ -680,9 +707,92 @@ require!(output_amount >= min_output, SlippageExceeded);
 
 ---
 
+### 3.9 `propose_admin` (2-step rotation, step 1)
+
+**Purpose:** Safe alternative to the irreversible single-step `rotate_admin`.
+Records a pending rotation that the new admin must explicitly accept from
+their own wallet. A wrong-pubkey typo aborts at step 2 instead of locking
+the admin role.
+
+**Parameters:**
+
+| Name | Type | Description |
+|---|---|---|
+| `new_admin` | Pubkey | The pubkey that must sign `accept_admin` to take over. Must be non-zero and `!= current admin`. |
+
+**Accounts:**
+
+| Account | Type | Mut | Signer | Description |
+|---|---|---|---|---|
+| `admin`           | Signer                  | Yes | Yes    | Must equal current `pool_state.admin`. Pays rent for the proposal PDA. |
+| `pool_state`      | PoolState               | No  | No     | Read-only (admin check). |
+| `admin_proposal`  | AdminRotationProposal   | Yes | No     | PDA: `[b"admin_proposal", pool_state]`. Must be uninitialized. |
+| `system_program`  | Program                 | No  | No     | — |
+
+**Validations:**
+- `admin.key() == pool_state.admin` → `UnauthorizedAdmin`
+- `new_admin != 0 && new_admin != current admin` → `InvalidNewAdmin`
+- `admin_proposal` is the expected PDA → `WrongPda`
+- `admin_proposal` is uninitialized → `InvalidNewAdmin` (cancel first)
+
+**Logic:** create the `admin_proposal` PDA (admin pays rent), populate
+`{pool, proposed_by = admin, new_admin, created_slot, bump}`. Emit
+`AdminProposalCreated`.
+
 ---
 
-## 3.9 Events
+### 3.10 `accept_admin` (2-step rotation, step 2 — happy path)
+
+**Purpose:** The proposed new admin claims the role.
+
+**Parameters:** none.
+
+**Accounts:**
+
+| Account | Type | Mut | Signer | Description |
+|---|---|---|---|---|
+| `new_admin`       | Signer                  | Yes | Yes    | Must equal `proposal.new_admin`. Receives the reclaimed rent. |
+| `pool_state`      | PoolState               | Yes | No     | `pool.admin` is overwritten to `new_admin`. |
+| `admin_proposal`  | AdminRotationProposal   | Yes | No     | Closed; rent → `new_admin`. |
+
+**Validations:**
+- `new_admin.key() == proposal.new_admin` → `UnauthorizedAdmin`
+- `admin_proposal` is the expected PDA → `WrongPda`
+- `proposal.proposed_by == pool_state.admin` → `ProposalStale` (admin
+  changed since the proposal was made — abort to avoid completing a
+  rotation the current admin didn't authorize)
+
+**Logic:** set `pool.admin = new_admin`, close `admin_proposal` (rent →
+`new_admin`). Emit `AdminRotated` (mirrors the single-step event for
+indexer parity).
+
+---
+
+### 3.11 `cancel_admin_proposal` (2-step rotation, abort path)
+
+**Purpose:** Drop a pending proposal without rotating. Callable by either
+the current admin (typo cleanup) or the proposed new admin (decline).
+
+**Parameters:** none.
+
+**Accounts:**
+
+| Account | Type | Mut | Signer | Description |
+|---|---|---|---|---|
+| `admin`           | Signer                  | Yes | Yes    | Must equal `pool_state.admin` OR `proposal.new_admin`. Receives the reclaimed rent. |
+| `pool_state`      | PoolState               | No  | No     | Read-only (signer check). |
+| `admin_proposal`  | AdminRotationProposal   | Yes | No     | Closed; rent → `admin`. |
+
+**Validations:**
+- `admin` is current admin OR proposed new_admin → `UnauthorizedAdmin`
+- `admin_proposal` is the expected PDA → `WrongPda`
+
+**Logic:** close `admin_proposal` (rent → `admin`). Emit
+`AdminProposalCancelled`. `pool.admin` unchanged.
+
+---
+
+## 3.12 Events
 
 Every state-changing instruction emits an event via `emit!`. Used by the
 frontend history feature, keeper analytics, and external indexers. The schema
@@ -690,14 +800,16 @@ is auto-included in the IDL, so the SDK decodes events with typed values.
 
 | Event                  | Trigger                       | Key fields                                                                                                                                  |
 |------------------------|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| `PoolInitialized`      | `init_pool`                   | pool, admin, oracle_signer, base/quote mint, initial_fair_value, initial_spread_bps, initial_mode_ttl, slot                                  |
-| `OracleUpdated`        | `update_oracle`               | pool, oracle_signer, new_fair_value, new_spread_bps, new_nonce, new_ttl, slot                                                                |
-| `SwapExecuted`         | `execute_swap`                | pool, user, direction (0/1), **mode (0=curve, 1=rfq)**, input_amount, output_amount, **execution_price**, quote_nonce (RFQ only), slot       |
-| `PoolPausedChanged`    | `set_paused`                  | pool, admin, paused, slot                                                                                                                    |
-| `OracleSignerRotated`  | `rotate_oracle_signer`        | pool, admin, previous_signer, new_signer, slot                                                                                               |
-| `AdminRotated`         | `rotate_admin`                | pool, previous_admin, new_admin, slot                                                                                                        |
-| `InventoryWithdrawn`   | `admin_withdraw_inventory`    | pool, admin, base_amount, quote_amount, slot                                                                                                 |
-| `QuoteMarkerClosed`    | `close_expired_nonce`         | pool, closer, nonce, expiry_slot, slot                                                                                                       |
+| `PoolInitialized`         | `init_pool`                   | pool, admin, oracle_signer, base/quote mint, initial_fair_value, initial_spread_bps, initial_mode_ttl, slot                                  |
+| `OracleUpdated`           | `update_oracle`               | pool, oracle_signer, new_fair_value, new_spread_bps, new_nonce, new_ttl, slot                                                                |
+| `SwapExecuted`            | `execute_swap`                | pool, user, direction (0/1), **mode (0=curve, 1=rfq)**, input_amount, output_amount, **execution_price**, quote_nonce (RFQ only), slot       |
+| `PoolPausedChanged`       | `set_paused`                  | pool, admin, paused, slot                                                                                                                    |
+| `OracleSignerRotated`     | `rotate_oracle_signer`        | pool, admin, previous_signer, new_signer, slot                                                                                               |
+| `AdminRotated`            | `rotate_admin` / `accept_admin` | pool, previous_admin, new_admin, slot                                                                                                       |
+| `InventoryWithdrawn`      | `admin_withdraw_inventory`    | pool, admin, base_amount, quote_amount, slot                                                                                                 |
+| `QuoteMarkerClosed`       | `close_expired_nonce`         | pool, closer, nonce, expiry_slot, slot                                                                                                       |
+| `AdminProposalCreated`    | `propose_admin`               | pool, proposed_by, new_admin, slot                                                                                                          |
+| `AdminProposalCancelled`  | `cancel_admin_proposal`       | pool, admin, cancelled_new_admin, slot                                                                                                       |
 
 > **Side enum flattening**: inside events, `direction` is a u8 (0=Buy, 1=Sell)
 > — better for IDL enum compatibility and indexer ergonomics. Instruction
@@ -726,6 +838,11 @@ is auto-included in the IDL, so the SDK decodes events with typed values.
 | 6103 | InvalidFairValue        | fair_value is 0 or invalid                               |
 | 6104 | InvalidSpread           | spread_bps exceeds MAX_SPREAD_BPS                        |
 | 6105 | InvalidSize | input_amount == 0 |
+| 6106 | InvalidDepthParams      | depth.max_depth_bps > MAX_DEPTH_BPS or size_unit == 0    |
+| 6107 | InvalidSkewParams       | skew.max_skew_offset_bps > MAX_SKEW_OFFSET_BPS or target_base_bps > BPS_DENOMINATOR |
+| 6108 | InvalidOracleSignerKey  | authorized_oracle_signer == 0                             |
+| 6109 | InvalidNewAdmin         | proposed new_admin is zero / equals current admin / proposal already exists |
+| 6110 | ProposalStale           | `accept_admin` rejected because admin changed since the proposal was created |
 | 6200 | UnauthorizedOracle      | Oracle signer mismatch                                   |
 | 6201 | UnauthorizedAdmin       | Admin mismatch                                           |
 | 6202 | NonceNotMonotonic       | new_nonce <= current nonce                               |
@@ -737,10 +854,22 @@ is auto-included in the IDL, so the SDK decodes events with typed values.
 | 6304 | QuoteDirectionMismatch | quote.direction != param.direction |
 | 6305 | QuoteSizeMismatch | quote.input_amount != input_amount |
 | 6306 | QuoteSignatureInvalid   | ed25519 verify failed                                    |
+| 6307 | QuoteAlreadyUsed        | quote_nonce_marker PDA already exists — replay rejected  |
 | 6400 | SlippageExceeded | output_amount < min_output |
 | 6401 | InsufficientReserves    | Insufficient vault balance                               |
 | 6500 | WrongPool               | account.pool does not match pool_state                   |
 | 6501 | NonceNotYetClosable | `expiry_slot + SAFETY_BUFFER_SLOTS >= now` |
+| 6502 | WrongDiscriminator      | Account discriminator tag mismatch (zero-copy decode)    |
+| 6503 | WrongAccountOwner       | Account owner does not match the expected program        |
+| 6504 | WrongPda                | Account is not the expected program-derived address      |
+| 6505 | MissingSigner           | Required signer flag is not set on the account           |
+| 6506 | NotWritable             | Required `is_writable` flag is not set on the account    |
+| 6507 | WrongTokenMint          | Token account mint does not match the expected mint      |
+| 6508 | WrongAccountSize        | Account data length does not match the expected size     |
+| 6509 | WrongAccountAddress     | Account address does not match the expected pubkey       |
+| 6510 | UnknownInstruction      | Dispatcher saw an unknown 1-byte instruction tag         |
+| 6511 | InvalidInstructionData  | Borsh deserialize of instruction args failed             |
+| 6512 | NotEnoughAccountKeys    | Required account was not provided in the accounts slice  |
 
 ---
 
