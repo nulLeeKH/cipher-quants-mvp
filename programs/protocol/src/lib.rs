@@ -1,139 +1,137 @@
+#![cfg_attr(not(test), no_std)]
+#![allow(unexpected_cfgs)]
+
+extern crate alloc;
+
 pub mod constants;
 pub mod error;
 pub mod events;
 pub mod instructions;
 pub mod math;
+pub mod safety;
 pub mod state;
 
-use anchor_lang::prelude::*;
-
 pub use constants::*;
-pub use events::*;
-use instructions::*;
-pub use math::*;
-pub use state::*;
+pub use error::{ProtocolError, Result};
 
-declare_id!("3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy");
+use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
-#[program]
-pub mod protocol {
-    use super::*;
+// Program ID — mirrors `constants::PROGRAM_ID`. Both must always agree;
+// the `assert!` below makes drift a compile-time error.
+solana_address::declare_id!("3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy");
 
-    /// docs/SPECIFICATION.md §3.1
-    pub fn init_pool(
-        ctx: Context<InitPool>,
-        authorized_oracle_signer: Pubkey,
-        initial_fair_value: u64,
-        initial_spread_bps: u16,
-        initial_depth_params: DepthParams,
-        initial_skew_params: SkewParams,
-        initial_mode_ttl: u8,
-    ) -> Result<()> {
-        instructions::init_pool::process_init_pool(
-            ctx,
-            authorized_oracle_signer,
-            initial_fair_value,
-            initial_spread_bps,
-            initial_depth_params,
-            initial_skew_params,
-            initial_mode_ttl,
-        )
+const _: () = assert!(
+    // `Address` is just a 32-byte newtype, so comparing the raw byte arrays
+    // is sufficient and works in a `const` context.
+    bytes_eq(ID.as_array(), constants::PROGRAM_ID.as_array()),
+    "declare_id! and constants::PROGRAM_ID must be the same pubkey"
+);
+
+const fn bytes_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut i = 0;
+    while i < 32 {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+// ============================================================================
+// Instruction Dispatch
+// ============================================================================
+// Layout: the first byte of `instruction_data` is the discriminator tag; the
+// remaining bytes are the Borsh-serialized instruction args. Tags are stable
+// — never reorder, never reuse a retired tag.
+//
+// Spec: docs/SPECIFICATION.md §3.
+
+#[repr(u8)]
+pub enum InstructionTag {
+    InitPool = 0,
+    UpdateOracle = 1,
+    ExecuteSwap = 2,
+    SetPaused = 3,
+    RotateOracleSigner = 4,
+    RotateAdmin = 5,
+    AdminWithdrawInventory = 6,
+    CloseExpiredNonce = 7,
+    ProposeAdmin = 8,
+    AcceptAdmin = 9,
+    CancelAdminProposal = 10,
+}
+
+// We are `no_std` for the on-chain target. The default `entrypoint!` macro
+// emits `default_panic_handler!` which is only a *hook* on top of Rust's std
+// panic handler — fine for std builds, but on-chain `no_std` needs a real
+// `#[panic_handler]` function. `nostd_panic_handler!` supplies one.
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::program_entrypoint!(process_instruction);
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::default_allocator!();
+#[cfg(not(feature = "no-entrypoint"))]
+pinocchio::nostd_panic_handler!();
+
+/// Pre-rendered `Instruction: <Name>` byte strings — one per dispatch tag.
+/// The dispatcher emits the matching line via `sol_log_` at entry so each
+/// transaction's CU lines (`Program ... consumed N of M`) can be bucketed by
+/// handler in `scripts/measure-cu.sh` and standard log inspectors.
+///
+/// Pre-rendered (vs. building the buffer at runtime) so the optimizer can't
+/// drop the data — we observed earlier that an intermediate `copy_from_slice`
+/// approach got eliminated when the constants weren't held in `static`.
+///
+/// Only used in the on-chain build; `cfg`-gated so the host (test) build
+/// doesn't warn on unused data.
+#[cfg(target_os = "solana")]
+static IX_LOG_LINES: [&[u8]; 11] = [
+    b"Instruction: InitPool",
+    b"Instruction: UpdateOracle",
+    b"Instruction: ExecuteSwap",
+    b"Instruction: SetPaused",
+    b"Instruction: RotateOracleSigner",
+    b"Instruction: RotateAdmin",
+    b"Instruction: AdminWithdrawInventory",
+    b"Instruction: CloseExpiredNonce",
+    b"Instruction: ProposeAdmin",
+    b"Instruction: AcceptAdmin",
+    b"Instruction: CancelAdminProposal",
+];
+
+pub fn process_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    let (tag, ix_data) = instruction_data
+        .split_first()
+        .ok_or(ProgramError::InvalidInstructionData)?;
+
+    #[cfg(target_os = "solana")]
+    {
+        let idx = *tag as usize;
+        if idx < IX_LOG_LINES.len() {
+            let line: &[u8] = IX_LOG_LINES[idx];
+            // SAFETY: `line` is a `'static [u8]` from the table above.
+            unsafe {
+                pinocchio::syscalls::sol_log_(line.as_ptr(), line.len() as u64);
+            }
+        }
     }
 
-    /// docs/SPECIFICATION.md §3.2
-    pub fn update_oracle(
-        ctx: Context<UpdateOracle>,
-        new_fair_value: u64,
-        new_spread_bps: u16,
-        new_depth_params: DepthParams,
-        new_skew_params: SkewParams,
-        new_nonce: u64,
-        new_ttl: u8,
-    ) -> Result<()> {
-        instructions::update_oracle::process_update_oracle(
-            ctx,
-            new_fair_value,
-            new_spread_bps,
-            new_depth_params,
-            new_skew_params,
-            new_nonce,
-            new_ttl,
-        )
-    }
-
-    /// docs/SPECIFICATION.md §3.4
-    pub fn set_paused(ctx: Context<SetPaused>, paused: bool) -> Result<()> {
-        instructions::set_paused::process_set_paused(ctx, paused)
-    }
-
-    /// docs/SPECIFICATION.md §3.5
-    pub fn rotate_oracle_signer(
-        ctx: Context<RotateOracleSigner>,
-        new_authorized_oracle_signer: Pubkey,
-    ) -> Result<()> {
-        instructions::rotate_oracle_signer::process_rotate_oracle_signer(
-            ctx,
-            new_authorized_oracle_signer,
-        )
-    }
-
-    /// docs/SPECIFICATION.md §3.7 — single-step rotation (deprecated, retained
-    /// for backward compatibility / emergency recovery). Prefer the 2-step
-    /// `propose_admin` + `accept_admin` flow.
-    pub fn rotate_admin(ctx: Context<RotateAdmin>, new_admin: Pubkey) -> Result<()> {
-        instructions::rotate_admin::process_rotate_admin(ctx, new_admin)
-    }
-
-    /// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 1: current admin
-    /// publishes a candidate. Creates the per-pool `admin_proposal` PDA.
-    pub fn propose_admin(ctx: Context<ProposeAdmin>, new_admin: Pubkey) -> Result<()> {
-        instructions::propose_admin::process_propose_admin(ctx, new_admin)
-    }
-
-    /// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 2: candidate signs
-    /// to take over. Atomically swaps `pool_state.admin` and closes the
-    /// proposal account.
-    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
-        instructions::accept_admin::process_accept_admin(ctx)
-    }
-
-    /// docs/SPECIFICATION.md §3.7 — withdraw a pending proposal (current admin).
-    pub fn cancel_admin_proposal(ctx: Context<CancelAdminProposal>) -> Result<()> {
-        instructions::cancel_admin_proposal::process_cancel_admin_proposal(ctx)
-    }
-
-    /// docs/SPECIFICATION.md §3.6
-    pub fn admin_withdraw_inventory(
-        ctx: Context<AdminWithdrawInventory>,
-        withdraw_base_amount: u64,
-        withdraw_quote_amount: u64,
-    ) -> Result<()> {
-        instructions::admin_withdraw_inventory::process_admin_withdraw_inventory(
-            ctx,
-            withdraw_base_amount,
-            withdraw_quote_amount,
-        )
-    }
-
-    /// docs/SPECIFICATION.md §3.7
-    pub fn close_expired_nonce(ctx: Context<CloseExpiredNonce>) -> Result<()> {
-        instructions::close_expired_nonce::process_close_expired_nonce(ctx)
-    }
-
-    /// docs/SPECIFICATION.md §3.3 — Curve/RFQ hybrid swap (ExactIn)
-    pub fn execute_swap<'info>(
-        ctx: Context<'_, '_, '_, 'info, ExecuteSwap<'info>>,
-        input_amount: u64,
-        direction: Side,
-        min_output: u64,
-        signed_quote_opt: Option<SignedQuote>,
-    ) -> Result<()> {
-        instructions::execute_swap::process_execute_swap(
-            ctx,
-            input_amount,
-            direction,
-            min_output,
-            signed_quote_opt,
-        )
+    match *tag {
+        0 => instructions::init_pool::process(program_id, accounts, ix_data),
+        1 => instructions::update_oracle::process(program_id, accounts, ix_data),
+        2 => instructions::execute_swap::process(program_id, accounts, ix_data),
+        3 => instructions::set_paused::process(program_id, accounts, ix_data),
+        4 => instructions::rotate_oracle_signer::process(program_id, accounts, ix_data),
+        5 => instructions::rotate_admin::process(program_id, accounts, ix_data),
+        6 => instructions::admin_withdraw_inventory::process(program_id, accounts, ix_data),
+        7 => instructions::close_expired_nonce::process(program_id, accounts, ix_data),
+        8 => instructions::propose_admin::process(program_id, accounts, ix_data),
+        9 => instructions::accept_admin::process(program_id, accounts, ix_data),
+        10 => instructions::cancel_admin_proposal::process(program_id, accounts, ix_data),
+        _ => Err(ProtocolError::UnknownInstruction.into()),
     }
 }

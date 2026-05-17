@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { BN } from "@coral-xyz/anchor";
+import { BN } from "@cipher-quants/sdk";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { ArrowDownUp, RefreshCw, ShieldAlert, Loader2 } from "lucide-react";
@@ -16,7 +16,7 @@ import {
   friendlyError,
   createExecuteSwapIx,
   type Side,
-} from "@solana-boilerplate/sdk";
+} from "@cipher-quants/sdk";
 
 import { Nav } from "@/components/nav";
 import { Button } from "@/components/ui/button";

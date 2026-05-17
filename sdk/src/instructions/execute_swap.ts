@@ -1,22 +1,12 @@
-import { BN, Program } from "@coral-xyz/anchor";
-import {
-  PublicKey,
-  SystemProgram,
-  SYSVAR_INSTRUCTIONS_PUBKEY,
-  TransactionInstruction,
-} from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import BN from "bn.js";
 
-import { Protocol } from "../idl/protocol.js";
+import { type Program, type SideArg, sideToArg } from "../program.js";
 
 export type Side = "buy" | "sell";
 
-/** Anchor IDL Side enum as a union-object (Borsh enum encoding). */
-export type SideArg = { buy: Record<string, never> } | { sell: Record<string, never> };
-
-export function sideToArg(side: Side): SideArg {
-  return side === "buy" ? { buy: {} } : { sell: {} };
-}
+export { sideToArg };
+export type { SideArg };
 
 /**
  * Map (input_mint, output_mint) → Side for the given pool.
@@ -27,8 +17,6 @@ export function sideToArg(side: Side): SideArg {
  *
  * - input=quote, output=base → Buy (user buys base)
  * - input=base, output=quote → Sell (user sells base)
- *
- * Any other combination (e.g. a mint not in the pool) throws.
  */
 export function directionFromMints(
   inputMint: PublicKey,
@@ -46,19 +34,18 @@ export function directionFromMints(
 }
 
 /**
- * SignedQuote is forwarded straight into the Anchor instruction, so `direction`
- * uses the Anchor union-object form. SDK consumers create this via
- * `buildSignedQuoteWithVerifyIx`, which converts internally.
+ * Signed RFQ quote argument forwarded into `execute_swap`. SDK consumers
+ * create this via `buildSignedQuoteWithVerifyIx`.
  */
 export interface SignedQuoteArg {
   pool: PublicKey;
   user: PublicKey;
-  direction: SideArg;
+  direction: SideArg | Side;
   inputAmount: BN;
   price: BN;
   expirySlot: BN;
   nonce: BN;
-  signature: number[]; // 64 bytes
+  signature: number[] | Uint8Array; // 64 bytes
 }
 
 export interface ExecuteSwapParams {
@@ -89,12 +76,9 @@ export interface ExecuteSwapParams {
  * For the curve path, leave both undefined/null.
  */
 export async function createExecuteSwapIx(
-  program: Program<Protocol>,
+  program: Program,
   params: ExecuteSwapParams
 ): Promise<TransactionInstruction> {
-  // RFQ-path consistency — if signedQuote is set but quoteNonceMarker is not,
-  // the on-chain program errors cryptically. Catch the mistake at the SDK
-  // entry point.
   if (params.signedQuote && !params.quoteNonceMarker) {
     throw new Error(
       "executeSwap: signedQuote provided without quoteNonceMarker. " +
@@ -102,22 +86,12 @@ export async function createExecuteSwapIx(
     );
   }
 
-  const directionArg = sideToArg(params.direction);
-  // SignedQuoteArg.direction is already in SideArg union-object form
-  // (buildSignedQuoteWithVerifyIx performs the conversion).
-  const signedQuoteArg = params.signedQuote ?? null;
-
-  // Anchor IDL-generated argument types use deeply-nested unions; passing our
-  // typed SideArg / SignedQuoteArg matches at runtime but is too narrow for
-  // Anchor's structural compare. We trust the runtime layout and accept the
-  // structural cast (NOT a security guard — Borsh discriminants are tested in
-  // tests/protocol.test.ts "Borsh parity").
   let builder = program.methods
     .executeSwap(
       params.inputAmount,
-      directionArg as Parameters<typeof program.methods.executeSwap>[1],
+      params.direction,
       params.minOutput,
-      signedQuoteArg as Parameters<typeof program.methods.executeSwap>[3]
+      params.signedQuote ?? null
     )
     .accountsPartial({
       user: params.user,
@@ -126,9 +100,6 @@ export async function createExecuteSwapIx(
       quoteVault: params.quoteVault,
       userBaseAta: params.userBaseAta,
       userQuoteAta: params.userQuoteAta,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-      instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
     });
 
   if (params.quoteNonceMarker) {
@@ -141,5 +112,5 @@ export async function createExecuteSwapIx(
     ]);
   }
 
-  return await builder.instruction();
+  return builder.instruction();
 }

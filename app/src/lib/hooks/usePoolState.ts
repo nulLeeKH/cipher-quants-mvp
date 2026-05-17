@@ -6,7 +6,7 @@ import {
   fetchPoolState,
   derivePoolState,
   type PoolStateView,
-} from "@solana-boilerplate/sdk";
+} from "@cipher-quants/sdk";
 
 import { useProgram } from "@/components/providers/program";
 

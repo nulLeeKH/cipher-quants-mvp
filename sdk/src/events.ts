@@ -1,24 +1,24 @@
-import {
-  AnchorProvider,
-  BN,
-  BorshCoder,
-  EventParser,
-  Program,
-} from "@coral-xyz/anchor";
-import type { PublicKey } from "@solana/web3.js";
-
-import { Protocol } from "./idl/protocol.js";
-import { IDL, PROGRAM_ID } from "./program.js";
-
 // ============================================================================
-// Event payload shapes — mirror of programs/protocol/src/events.rs
+// Event log decoder
 // ============================================================================
-// Field names: snake_case → camelCase per Anchor IDL convention.
-// u64 → BN, Pubkey → PublicKey, u8/u16/bool → number/boolean.
+// Mirrors programs/protocol/src/events.rs. The Pinocchio-era program emits
+// each event as one log line of the form
 //
-// Keep in sync with events.rs when adding fields. The discriminated union
-// below uses these per-name types so consumers get autocomplete + type-checked
-// field access instead of `any`.
+//   Program log: EVT:<base64>
+//
+// where the base64 payload is `[1-byte tag][Borsh body]`. We strip the
+// `Program log: ` runtime prefix, the `EVT:` marker, decode base64, peel
+// the tag, and Borsh-deserialize the remainder into the matching struct.
+
+import type { Connection, PublicKey } from "@solana/web3.js";
+import BN from "bn.js";
+
+import { Reader } from "./borsh.js";
+import { PROGRAM_ID, type AnchorProvider } from "./program.js";
+
+// ----------------------------------------------------------------------------
+// Event payload shapes (1:1 with programs/protocol/src/events.rs)
+// ----------------------------------------------------------------------------
 
 export interface PoolInitializedData {
   pool: PublicKey;
@@ -52,7 +52,6 @@ export interface SwapExecutedData {
   inputAmount: BN;
   outputAmount: BN;
   executionPrice: BN;
-  /** Nonzero only on the RFQ path; the curve path always emits 0. */
   quoteNonce: BN;
   slot: BN;
 }
@@ -95,6 +94,20 @@ export interface QuoteMarkerClosedData {
   slot: BN;
 }
 
+export interface AdminProposalCreatedData {
+  pool: PublicKey;
+  proposedBy: PublicKey;
+  newAdmin: PublicKey;
+  slot: BN;
+}
+
+export interface AdminProposalCancelledData {
+  pool: PublicKey;
+  admin: PublicKey;
+  cancelledNewAdmin: PublicKey;
+  slot: BN;
+}
+
 export interface ProtocolEventDataMap {
   PoolInitialized: PoolInitializedData;
   OracleUpdated: OracleUpdatedData;
@@ -104,46 +117,234 @@ export interface ProtocolEventDataMap {
   AdminRotated: AdminRotatedData;
   InventoryWithdrawn: InventoryWithdrawnData;
   QuoteMarkerClosed: QuoteMarkerClosedData;
+  AdminProposalCreated: AdminProposalCreatedData;
+  AdminProposalCancelled: AdminProposalCancelledData;
 }
 
 export type ProtocolEventName = keyof ProtocolEventDataMap;
 
+export type DecodedEvent = {
+  [K in ProtocolEventName]: { name: K; data: ProtocolEventDataMap[K] };
+}[ProtocolEventName];
+
+// ----------------------------------------------------------------------------
+// Base64 decoder (RFC 4648 alphabet, accepts padded and unpadded inputs)
+// ----------------------------------------------------------------------------
+
+const BASE64_TABLE: Int8Array = (() => {
+  const t = new Int8Array(256).fill(-1);
+  const a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  for (let i = 0; i < a.length; i++) t[a.charCodeAt(i)] = i;
+  // also accept URL-safe variants
+  t["-".charCodeAt(0)] = 62;
+  t["_".charCodeAt(0)] = 63;
+  return t;
+})();
+
+function base64Decode(s: string): Uint8Array | null {
+  // Drop padding.
+  while (s.endsWith("=")) s = s.slice(0, -1);
+  const out = new Uint8Array(Math.floor((s.length * 3) / 4));
+  let oi = 0;
+  let buf = 0;
+  let bits = 0;
+  for (let i = 0; i < s.length; i++) {
+    const v = BASE64_TABLE[s.charCodeAt(i)];
+    if (v < 0) return null;
+    buf = (buf << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[oi++] = (buf >> bits) & 0xff;
+    }
+  }
+  return out.subarray(0, oi);
+}
+
+// ----------------------------------------------------------------------------
+// Per-event decoders
+// ----------------------------------------------------------------------------
+
+const TAG_POOL_INITIALIZED = 0x01;
+const TAG_ORACLE_UPDATED = 0x02;
+const TAG_SWAP_EXECUTED = 0x03;
+const TAG_POOL_PAUSED_CHANGED = 0x04;
+const TAG_ORACLE_SIGNER_ROTATED = 0x05;
+const TAG_ADMIN_ROTATED = 0x06;
+const TAG_INVENTORY_WITHDRAWN = 0x07;
+const TAG_QUOTE_MARKER_CLOSED = 0x08;
+const TAG_ADMIN_PROPOSAL_CREATED = 0x09;
+const TAG_ADMIN_PROPOSAL_CANCELLED = 0x0a;
+
+function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
+  const r = new Reader(body);
+  try {
+    switch (tag) {
+      case TAG_POOL_INITIALIZED:
+        return {
+          name: "PoolInitialized",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            oracleSigner: r.pubkey(),
+            baseMint: r.pubkey(),
+            quoteMint: r.pubkey(),
+            initialFairValue: r.u64(),
+            initialSpreadBps: r.u16(),
+            initialModeTtl: r.u8(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_ORACLE_UPDATED:
+        return {
+          name: "OracleUpdated",
+          data: {
+            pool: r.pubkey(),
+            oracleSigner: r.pubkey(),
+            newFairValue: r.u64(),
+            newSpreadBps: r.u16(),
+            newNonce: r.u64(),
+            newTtl: r.u8(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_SWAP_EXECUTED:
+        return {
+          name: "SwapExecuted",
+          data: {
+            pool: r.pubkey(),
+            user: r.pubkey(),
+            direction: r.u8(),
+            mode: r.u8(),
+            inputAmount: r.u64(),
+            outputAmount: r.u64(),
+            executionPrice: r.u64(),
+            quoteNonce: r.u64(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_POOL_PAUSED_CHANGED:
+        return {
+          name: "PoolPausedChanged",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            paused: r.u8() !== 0,
+            slot: r.u64(),
+          },
+        };
+      case TAG_ORACLE_SIGNER_ROTATED:
+        return {
+          name: "OracleSignerRotated",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            previousSigner: r.pubkey(),
+            newSigner: r.pubkey(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_ADMIN_ROTATED:
+        return {
+          name: "AdminRotated",
+          data: {
+            pool: r.pubkey(),
+            previousAdmin: r.pubkey(),
+            newAdmin: r.pubkey(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_INVENTORY_WITHDRAWN:
+        return {
+          name: "InventoryWithdrawn",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            baseAmount: r.u64(),
+            quoteAmount: r.u64(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_QUOTE_MARKER_CLOSED:
+        return {
+          name: "QuoteMarkerClosed",
+          data: {
+            pool: r.pubkey(),
+            closer: r.pubkey(),
+            nonce: r.u64(),
+            expirySlot: r.u64(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_ADMIN_PROPOSAL_CREATED:
+        return {
+          name: "AdminProposalCreated",
+          data: {
+            pool: r.pubkey(),
+            proposedBy: r.pubkey(),
+            newAdmin: r.pubkey(),
+            slot: r.u64(),
+          },
+        };
+      case TAG_ADMIN_PROPOSAL_CANCELLED:
+        return {
+          name: "AdminProposalCancelled",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            cancelledNewAdmin: r.pubkey(),
+            slot: r.u64(),
+          },
+        };
+      default:
+        return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Decoded event. When narrowed by `name`, `data` is inferred as the correct
- * payload type (no more `any`).
- *
- *   const ev: DecodedEvent = ...;
- *   if (ev.name === "SwapExecuted") {
- *     ev.data.executionPrice.toString(); // BN, type-checked
- *   }
+ * Decode a single log line into a DecodedEvent. Returns `null` for any line
+ * that is not an event (or whose tag is unknown).
  */
-export type DecodedEvent =
-  | { name: "PoolInitialized"; data: PoolInitializedData }
-  | { name: "OracleUpdated"; data: OracleUpdatedData }
-  | { name: "SwapExecuted"; data: SwapExecutedData }
-  | { name: "PoolPausedChanged"; data: PoolPausedChangedData }
-  | { name: "OracleSignerRotated"; data: OracleSignerRotatedData }
-  | { name: "AdminRotated"; data: AdminRotatedData }
-  | { name: "InventoryWithdrawn"; data: InventoryWithdrawnData }
-  | { name: "QuoteMarkerClosed"; data: QuoteMarkerClosedData };
+export function decodeEventLog(rawLine: string): DecodedEvent | null {
+  let line = rawLine;
+  if (line.startsWith("Program log: ")) line = line.slice("Program log: ".length);
+  else if (line.startsWith("Program data: ")) line = line.slice("Program data: ".length);
+  if (!line.startsWith("EVT:")) return null;
+  const encoded = line.slice("EVT:".length).trim();
+  const payload = base64Decode(encoded);
+  if (!payload || payload.length < 1) return null;
+  const tag = payload[0];
+  return decodeBody(tag, payload.subarray(1));
+}
 
-// ============================================================================
-// Parse Anchor events from a confirmed transaction
-// ============================================================================
+// ----------------------------------------------------------------------------
+// Convenience: walk an entire transaction's logs
+// ----------------------------------------------------------------------------
+
+export function parseEventsFromLogs(logs: string[]): DecodedEvent[] {
+  const out: DecodedEvent[] = [];
+  for (const l of logs) {
+    const ev = decodeEventLog(l);
+    if (ev) out.push(ev);
+  }
+  return out;
+}
 
 /**
- * Fetch a confirmed transaction and parse all Anchor events from its logs.
- *
- * Usage:
- *   const events = await parseEventsFromTx(provider, signature);
- *   const swap = events.find(e => e.name === "SwapExecuted");
+ * Fetch a confirmed transaction and parse all events from its logs. Accepts
+ * either a connection or an AnchorProvider (back-compat with Anchor-era).
  */
 export async function parseEventsFromTx(
-  provider: AnchorProvider,
+  source: Connection | AnchorProvider,
   signature: string
 ): Promise<DecodedEvent[]> {
-  await provider.connection.confirmTransaction(signature, "confirmed");
-  const tx = await provider.connection.getTransaction(signature, {
+  const connection: Connection =
+    "connection" in source ? (source as AnchorProvider).connection : source;
+  await connection.confirmTransaction(signature, "confirmed");
+  const tx = await connection.getTransaction(signature, {
     commitment: "confirmed",
     maxSupportedTransactionVersion: 0,
   });
@@ -151,40 +352,15 @@ export async function parseEventsFromTx(
   return parseEventsFromLogs(tx.meta.logMessages);
 }
 
-/**
- * Parse events from raw log messages (e.g. WebSocket logsSubscribe payload).
- *
- * Unknown event names are dropped (forward-compat with newer program versions).
- */
-export function parseEventsFromLogs(logs: string[]): DecodedEvent[] {
-  const parser = new EventParser(PROGRAM_ID, new BorshCoder(IDL));
-  const known = new Set<ProtocolEventName>([
-    "PoolInitialized",
-    "OracleUpdated",
-    "SwapExecuted",
-    "PoolPausedChanged",
-    "OracleSignerRotated",
-    "AdminRotated",
-    "InventoryWithdrawn",
-    "QuoteMarkerClosed",
-  ]);
-  const out: DecodedEvent[] = [];
-  for (const ev of parser.parseLogs(logs)) {
-    if (!known.has(ev.name as ProtocolEventName)) continue;
-    // Anchor decodes into the same field shapes (camelCase) as our payload
-    // interfaces — assert that here. Runtime shape comes from BorshCoder
-    // applied to the IDL, which is generated from the on-chain types.
-    out.push({ name: ev.name, data: ev.data } as DecodedEvent);
-  }
-  return out;
-}
-
-/**
- * Listener-based event subscription. Returns the listener ID for `removeEventListener`.
- * Callback `data` is typed to the matching event payload.
- */
+/** Subscribe to a specific event type. Returns the listener id. */
 export function subscribeEvent<TName extends ProtocolEventName>(
-  program: Program<Protocol>,
+  target: {
+    addEventListener: (
+      name: TName,
+      cb: (data: unknown, slot: number, sig: string) => void
+    ) => number;
+    removeEventListener: (id: number) => Promise<void>;
+  },
   name: TName,
   callback: (
     data: ProtocolEventDataMap[TName],
@@ -192,13 +368,16 @@ export function subscribeEvent<TName extends ProtocolEventName>(
     signature: string
   ) => void
 ): number {
-  // deno-lint-ignore no-explicit-any
-  return program.addEventListener(name as any, callback as any);
+  return target.addEventListener(name, (data, slot, sig) =>
+    callback(data as ProtocolEventDataMap[TName], slot, sig)
+  );
 }
 
 export async function unsubscribeEvent(
-  program: Program<Protocol>,
+  target: { removeEventListener: (id: number) => Promise<void> },
   listenerId: number
 ): Promise<void> {
-  await program.removeEventListener(listenerId);
+  await target.removeEventListener(listenerId);
 }
+
+export { PROGRAM_ID };

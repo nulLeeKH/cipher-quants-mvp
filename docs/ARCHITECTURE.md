@@ -11,7 +11,7 @@
 
 The project is split into two halves:
 
-- **On-chain** — Anchor-based settlement program. Curve evaluation, RFQ signature verification, freshness check, token settlement.
+- **On-chain** — Pinocchio-based settlement program (`programs/protocol/`, no Anchor runtime). Curve evaluation, RFQ signature verification, freshness check, token settlement.
 - **Off-chain** — Price engine, oracle worker, RFQ webhook, inventory manager (full detail in [OPERATIONS.md](OPERATIONS.md)).
 
 Design keyword: a **single-MM hybrid** where RFQ is the baseline and the oracle
@@ -253,11 +253,12 @@ programs/protocol/src/
 
 ### 7.3 Standard Solana risks
 
-- Signer verification (Anchor `#[account(signer)]`)
-- PDA seed/bump verification (Anchor `#[account(seeds=..., bump=...)]`)
-- Token-program ownership verification
+- Signer verification (`safety::verify_signer(info)`)
+- PDA seed/bump verification (`safety::verify_pda_with_bump(info, &[seeds], bump, &PROGRAM_ID)`)
+- Token-program ownership verification (`safety::verify_owner_program(info, &TOKEN_PROGRAM_ID)`)
+- Discriminator + Borsh decode on state loads (`PoolState::from_account_view(info)`)
 - Checked arithmetic (CLAUDE.md rule)
-- Do NOT use `init_if_needed` — pools are initialized explicitly by the admin via `init_pool`.
+- All account initialization is explicit (`pinocchio_system::CreateAccount` PDA-signed). Pools are initialized exactly once via `init_pool`.
 
 > Adversarial-bot model and new-attack-vector hypotheses live in
 > [OPERATIONS.md §11 (Research methodology)](OPERATIONS.md#11-research-methodology).
@@ -281,8 +282,12 @@ programs/protocol/src/
 > Each event-emit adds ~1–3k CU per instruction. Every instruction emits an
 > event ([SPECIFICATION.md §3.9](SPECIFICATION.md#39-events)).
 
-Everything runs under the default 200k CU budget. Measurements live in the
-`consumed` lines of `.anchor/program-logs/*.log`.
+Everything runs under the default 200k CU budget. Measurements come from
+`scripts/measure-cu.sh`, which subscribes to `solana logs <PROGRAM_ID>` while
+Jest is running (solana-test-validator doesn't persist program logs to disk)
+and writes a summary to `docs/PERFORMANCE.md`. The Pinocchio port typically
+lands ~30–50% below the original Anchor numbers above — re-baseline after
+CU-sensitive changes by running `pnpm cu:measure`.
 
 ---
 

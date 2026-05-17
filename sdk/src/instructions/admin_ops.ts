@@ -1,18 +1,18 @@
-import { BN, Program } from "@coral-xyz/anchor";
 import { PublicKey, TransactionInstruction } from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import BN from "bn.js";
 
-import { Protocol } from "../idl/protocol.js";
+import { type Program } from "../program.js";
+import { deriveAdminProposal } from "../accounts/index.js";
 
 // ============================================================================
 // set_paused — SPECIFICATION §3.4
 // ============================================================================
 
 export async function createSetPausedIx(
-  program: Program<Protocol>,
+  program: Program,
   params: { admin: PublicKey; poolState: PublicKey; paused: boolean }
 ): Promise<TransactionInstruction> {
-  return await program.methods
+  return program.methods
     .setPaused(params.paused)
     .accountsPartial({ admin: params.admin, poolState: params.poolState })
     .instruction();
@@ -23,28 +23,28 @@ export async function createSetPausedIx(
 // ============================================================================
 
 export async function createRotateOracleSignerIx(
-  program: Program<Protocol>,
+  program: Program,
   params: {
     admin: PublicKey;
     poolState: PublicKey;
     newAuthorizedOracleSigner: PublicKey;
   }
 ): Promise<TransactionInstruction> {
-  return await program.methods
+  return program.methods
     .rotateOracleSigner(params.newAuthorizedOracleSigner)
     .accountsPartial({ admin: params.admin, poolState: params.poolState })
     .instruction();
 }
 
 // ============================================================================
-// rotate_admin — SPECIFICATION §3.7
+// rotate_admin (single-step) — SPECIFICATION §3.7
 // ============================================================================
 
 export async function createRotateAdminIx(
-  program: Program<Protocol>,
+  program: Program,
   params: { admin: PublicKey; poolState: PublicKey; newAdmin: PublicKey }
 ): Promise<TransactionInstruction> {
-  return await program.methods
+  return program.methods
     .rotateAdmin(params.newAdmin)
     .accountsPartial({ admin: params.admin, poolState: params.poolState })
     .instruction();
@@ -66,14 +66,11 @@ export interface AdminWithdrawParams {
 }
 
 export async function createAdminWithdrawInventoryIx(
-  program: Program<Protocol>,
+  program: Program,
   params: AdminWithdrawParams
 ): Promise<TransactionInstruction> {
-  return await program.methods
-    .adminWithdrawInventory(
-      params.withdrawBaseAmount,
-      params.withdrawQuoteAmount
-    )
+  return program.methods
+    .adminWithdrawInventory(params.withdrawBaseAmount, params.withdrawQuoteAmount)
     .accountsPartial({
       admin: params.admin,
       poolState: params.poolState,
@@ -81,7 +78,6 @@ export async function createAdminWithdrawInventoryIx(
       quoteVault: params.quoteVault,
       adminBaseAta: params.adminBaseAta,
       adminQuoteAta: params.adminQuoteAta,
-      tokenProgram: TOKEN_PROGRAM_ID,
     })
     .instruction();
 }
@@ -91,19 +87,68 @@ export async function createAdminWithdrawInventoryIx(
 // ============================================================================
 
 export async function createCloseExpiredNonceIx(
-  program: Program<Protocol>,
+  program: Program,
   params: {
     closer: PublicKey;
     poolState: PublicKey;
     quoteNonceMarker: PublicKey;
   }
 ): Promise<TransactionInstruction> {
-  return await program.methods
+  return program.methods
     .closeExpiredNonce()
     .accountsPartial({
       closer: params.closer,
       poolState: params.poolState,
       quoteNonceMarker: params.quoteNonceMarker,
+    })
+    .instruction();
+}
+
+// ============================================================================
+// propose_admin / accept_admin / cancel_admin_proposal — SPECIFICATION §3.7
+// ============================================================================
+
+export async function createProposeAdminIx(
+  program: Program,
+  params: { admin: PublicKey; poolState: PublicKey; newAdmin: PublicKey }
+): Promise<TransactionInstruction> {
+  const [adminProposal] = deriveAdminProposal(params.poolState, program.programId);
+  return program.methods
+    .proposeAdmin(params.newAdmin)
+    .accountsPartial({
+      admin: params.admin,
+      poolState: params.poolState,
+      adminProposal,
+    })
+    .instruction();
+}
+
+export async function createAcceptAdminIx(
+  program: Program,
+  params: { newAdmin: PublicKey; poolState: PublicKey }
+): Promise<TransactionInstruction> {
+  const [adminProposal] = deriveAdminProposal(params.poolState, program.programId);
+  return program.methods
+    .acceptAdmin()
+    .accountsPartial({
+      newAdmin: params.newAdmin,
+      poolState: params.poolState,
+      adminProposal,
+    })
+    .instruction();
+}
+
+export async function createCancelAdminProposalIx(
+  program: Program,
+  params: { admin: PublicKey; poolState: PublicKey }
+): Promise<TransactionInstruction> {
+  const [adminProposal] = deriveAdminProposal(params.poolState, program.programId);
+  return program.methods
+    .cancelAdminProposal()
+    .accountsPartial({
+      admin: params.admin,
+      poolState: params.poolState,
+      adminProposal,
     })
     .instruction();
 }

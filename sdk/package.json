@@ -1,7 +1,7 @@
 {
-  "name": "@solana-boilerplate/sdk",
-  "version": "0.0.1",
-  "description": "TypeScript SDK for the Cipher Quants Program",
+  "name": "@cipher-quants/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Cipher Quants Program (Pinocchio dispatch)",
   "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,6 +10,16 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./accounts": {
+      "types": "./dist/accounts/index.d.ts",
+      "require": "./dist/accounts/index.js",
+      "default": "./dist/accounts/index.js"
+    },
+    "./constants": {
+      "types": "./dist/constants/index.d.ts",
+      "require": "./dist/constants/index.js",
+      "default": "./dist/constants/index.js"
     }
   },
   "files": [
@@ -17,16 +27,14 @@
     "src"
   ],
   "scripts": {
-    "prebuild": "../scripts/copy-idl.sh",
     "build": "tsc",
     "clean": "rm -rf dist",
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@coral-xyz/anchor": "^0.32.1",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": ">=1.90.0",
-    "bs58": "^6.0.0"
+    "bn.js": "^5.2.1"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",
@@ -34,7 +42,6 @@
     "typescript": "^5.7.3"
   },
   "peerDependencies": {
-    "@coral-xyz/anchor": "^0.32.1",
     "@solana/web3.js": ">=1.90.0"
   },
   "license": "MIT"

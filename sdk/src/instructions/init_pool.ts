@@ -1,27 +1,23 @@
-import { BN, Program } from "@coral-xyz/anchor";
-import {
-  PublicKey,
-  SystemProgram,
-  SYSVAR_RENT_PUBKEY,
-  TransactionInstruction,
-} from "@solana/web3.js";
-import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import BN from "bn.js";
 
-import { Protocol } from "../idl/protocol.js";
 import { derivePoolState, deriveVault } from "../accounts/index.js";
+import { type Program } from "../program.js";
 
 export interface DepthParams {
   depthCoefBps: number;
   sizeUnit: BN;
   maxDepthBps: number;
-  reserved?: number[]; // 6 bytes, default zero-fill
+  /** Legacy slot for Anchor-era callers. Ignored — Borsh writes zeros itself. */
+  reserved?: number[];
 }
 
 export interface SkewParams {
   targetBaseBps: number;
   skewCoefBps: number;
   maxSkewOffsetBps: number;
-  reserved?: number[]; // 10 bytes, default zero-fill
+  /** Legacy slot for Anchor-era callers. Ignored — Borsh writes zeros itself. */
+  reserved?: number[];
 }
 
 export interface InitPoolParams {
@@ -36,21 +32,11 @@ export interface InitPoolParams {
   initialModeTtl: number;
 }
 
-function fillReserved(
-  params: DepthParams | SkewParams,
-  size: number
-): any {
-  return {
-    ...params,
-    reserved: params.reserved ?? Array(size).fill(0),
-  };
-}
-
 /**
  * SPECIFICATION §3.1 — init_pool
  */
 export async function createInitPoolIx(
-  program: Program<Protocol>,
+  program: Program,
   params: InitPoolParams
 ): Promise<TransactionInstruction> {
   const [poolState] = derivePoolState(
@@ -58,24 +44,20 @@ export async function createInitPoolIx(
     params.quoteMint,
     program.programId
   );
-  const [baseVault] = deriveVault(
-    poolState,
-    params.baseMint,
-    program.programId
-  );
+  const [baseVault] = deriveVault(poolState, params.baseMint, program.programId);
   const [quoteVault] = deriveVault(
     poolState,
     params.quoteMint,
     program.programId
   );
 
-  return await program.methods
+  return program.methods
     .initPool(
       params.authorizedOracleSigner,
       params.initialFairValue,
       params.initialSpreadBps,
-      fillReserved(params.initialDepthParams, 6) as any,
-      fillReserved(params.initialSkewParams, 10) as any,
+      params.initialDepthParams,
+      params.initialSkewParams,
       params.initialModeTtl
     )
     .accountsPartial({
@@ -85,9 +67,6 @@ export async function createInitPoolIx(
       quoteMint: params.quoteMint,
       baseVault,
       quoteVault,
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-      rent: SYSVAR_RENT_PUBKEY,
     })
     .instruction();
 }

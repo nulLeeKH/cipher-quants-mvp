@@ -579,7 +579,7 @@ For the operator's own use. Wallet auth restricts access to the `pool_state.admi
 | Freshness                   | `current_slot - last_update_slot` vs TTL → fresh/stale color coding                                                                                                                              |
 | Vault balances              | `base_vault.amount`, `quote_vault.amount` + ratio time-series chart + USD-notional conversion                                                                                                     |
 | Inventory management        | **Deposit form** (admin's base/quote ATA → vault via a single SPL Token transfer wallet tx) / **Withdraw form** (calls `admin_withdraw_inventory`)                                               |
-| Mode-transition log         | Most recent N `OracleUpdated` events (decoded from Anchor `emit!`) + mode changes                                                                                                                |
+| Mode-transition log         | Most recent N `OracleUpdated` events (decoded from the SDK's `parseEventsFromLogs` — `Program log: EVT:<base64>`) + mode changes                                                                  |
 | Trade log                   | Most recent N `SwapExecuted` events (includes execution_price, mode, quote_nonce)                                                                                                                |
 | Oracle-push statistics      | Pushes per hour, average latency, success rate                                                                                                                                                  |
 | **Admin actions**           | `set_paused` toggle / `rotate_oracle_signer` / **`rotate_admin`** (⚠ confirmation modal: type the new admin pubkey twice) / **force mode toggle** (= send command to the worker; §4.4 single-writer) |
@@ -610,7 +610,7 @@ Used as our own trading channel before / when JupiterZ registration is unavailab
 | **Mobile-responsive**                 | **Mobile-first from day 1.** Tailwind responsive utility classes (`sm:`, `md:`, `lg:`) applied consistently. Every page handles both mobile and desktop.                                                                                              |
 | **Language**                          | **English-only (permanent).** No i18n planned.                                                                                                                                                                                                         |
 | **Admin auth**                        | **Wallet-signing based (Ledger/Saga compatible)** — details in §14.4                                                                                                                                                                                   |
-| **Trade history**                     | **PoC fetches via RPC directly** (`getSignaturesForAddress` + `getTransaction` + Anchor event decoding). Migrate to an indexer / ClickHouse later (when performance limits surface).                                                                   |
+| **Trade history**                     | **PoC fetches via RPC directly** (`getSignaturesForAddress` + `getTransaction` + SDK `parseEventsFromLogs` base64/Borsh decode). Migrate to an indexer / ClickHouse later (when performance limits surface).                                            |
 | **Dashboard metrics**                 | **Next.js API route + direct RPC** (PoC). The frontend calls **Helius Secure RPC directly** (domain ACL protects). No separate proxy.                                                                                                                  |
 | **User UI mode-transition heads-up**  | **Not displayed** — the user sees only the current mode + quote and decides. When a mode transition is imminent, the RFQ webhook rejection (§5.3) protects them.                                                                                       |
 
@@ -677,7 +677,7 @@ app/
 │   ├── sdk.ts                    # @cipher-quants/sdk wrapper
 │   ├── rpc.ts                    # Helius Secure RPC client (Connection factory)
 │   ├── auth.ts                   # Admin auth (challenge signing + JWT lifecycle)
-│   └── decode.ts                 # Anchor event/tx decoder
+│   └── decode.ts                 # Thin wrapper over SDK `parseEventsFromLogs`
 └── hooks/                        # React hooks (useWallet, usePoolState, etc.)
 ```
 

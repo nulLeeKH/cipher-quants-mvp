@@ -1,107 +1,135 @@
-# Solana AI Boilerplate
+# Cipher Quants — PropAMM × RFQ Hybrid Settlement
 
-A production-ready Solana project template designed for **AI-assisted development** with Claude Code.
+Research-grade Solana program implementing the hybrid PropAMM / RFQ venue
+described in [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md). Built as a
+**Pinocchio** program — no Anchor runtime — with a hand-rolled Borsh SDK and
+matching Next.js / Deno tooling.
 
-## Features
+## Why this exists
 
-- **Monorepo structure**: On-chain program, TypeScript SDK, Next.js frontend, Deno keeper bot
-- **AI-optimized CLAUDE.md**: Comprehensive AI context file with development guides, patterns, and rules
-- **Battle-tested WAD math**: Fixed-point arithmetic library with u256 overflow protection
-- **Network-aware builds**: Mainnet/devnet/localnet build scripts with feature flags
-- **Test infrastructure**: Jest setup with structured JSON output and PDA collision prevention
-- **Instruction handler pattern**: 3-phase pattern (validate → CPI → state update) with detailed guides
+A single-MM settlement contract that accepts both (a) an on-chain curve
+controlled by the MM and (b) a signed RFQ quote attached to the transaction,
+and toggles between the two based on the **curve's freshness (TTL)**. RFQ is
+the baseline; PropAMM kicks in the instant the oracle worker detects a
+volatility spike and falls back to RFQ once vol calms down. Research goals,
+adversarial-bot model, and stage gates live in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
+## Tech stack (locked)
+
+| Layer       | Stack                                                                                   |
+|-------------|-----------------------------------------------------------------------------------------|
+| On-chain    | Rust + **Pinocchio 0.11** (no Anchor runtime). 11 instructions, ~144 KB `.so`.          |
+| SDK         | TypeScript (CommonJS). Hand-rolled Borsh codecs + Anchor-shaped `Program` shim — drops `@coral-xyz/anchor`. |
+| Frontend    | Next.js 14 + Solana Wallet Adapter. Mobile-first. Phantom / Solflare / Backpack / Ledger / Saga. |
+| Keeper      | Deno — oracle pusher (calls `update_oracle` while Mode A/B is active).                  |
+| API server  | Deno + Hono — RFQ webhook (JupiterZ-compatible), runs 24/7.                              |
+| Tests       | Jest + ts-jest, driven by `solana-test-validator` (`./scripts/test.sh`). 49 integration cases. |
 
 ## Prerequisites
 
-| Tool | Version | Docs |
-|------|---------|------|
-| Rust | latest stable | [rustup.rs](https://rustup.rs) |
-| Solana CLI | ≥ 1.18 | [Installation guide](https://solana.com/docs/intro/installation) |
-| Anchor | **0.32.1** | [Installation guide](https://www.anchor-lang.com/docs/installation) |
-| Node.js | **24.14.0** (≥ 24.0.0) | [nodejs.org](https://nodejs.org) |
-| pnpm | ≥ 9.0.0 | [pnpm.io/installation](https://pnpm.io/installation) |
+| Tool        | Version             |
+|-------------|---------------------|
+| Rust        | latest stable        |
+| Solana CLI  | ≥ 1.18 (`cargo build-sbf` ships with the platform-tools)    |
+| Node.js     | ≥ 24.0.0             |
+| pnpm        | ≥ 9.0.0              |
+| Deno        | ≥ 2.0 (keeper / api) |
 
-> **Note:** Anchor 0.32.x requires a specific Solana CLI version. Run `anchor --version` and `solana --version` after install to confirm compatibility.
+> No Anchor CLI required. `cargo build-sbf` (from the Solana CLI) builds the
+> program; integration tests spawn `solana-test-validator` directly via
+> `scripts/test.sh`.
 
-## Quick Start
+## Quick start
 
 ```bash
-# Build the program
-anchor build
-
-# Install dependencies
+# 1. Install JS workspace deps
 pnpm install
 
-# Run tests
-pnpm test
+# 2. Build everything
+./scripts/build.sh localnet    # cargo build-sbf → target/deploy/protocol.so
+pnpm sdk:build                  # SDK → sdk/dist/
 
-# Build SDK
-pnpm sdk:build
+# 3. Run integration tests (spawns its own validator)
+pnpm test                       # 49 tests; ~30s
 
-# Start keeper (Deno)
-pnpm keeper:dev
+# 4. Run Rust unit tests (math + Borsh parity, <1s)
+cargo test -p protocol --lib
+
+# 5. Long-lived dev validator
+pnpm validator:up               # bg; logs at .anchor/validator.log
+pnpm validator:down
+
+# 6. Off-chain services
+pnpm keeper:dev                 # oracle pusher
+pnpm api:dev                    # RFQ webhook
+pnpm app:dev                    # Next.js admin + swap UI
 ```
 
-## Project Structure
+## Project layout
 
 ```
-├── programs/protocol/    # On-chain Anchor program (Rust)
+.
+├── programs/protocol/     # Pinocchio on-chain program (11 instructions)
 │   └── src/
-│       ├── lib.rs            # Entry points
-│       ├── instructions/     # One file per instruction
-│       ├── state/            # Account structures
-│       ├── math/             # Business logic + WAD library
-│       ├── constants.rs      # PDA seeds, protocol params
-│       └── error.rs          # Error codes
-├── sdk/                  # TypeScript SDK
-├── app/                  # Next.js frontend
-├── keeper/               # Deno off-chain automation
-├── tests/                # Integration tests
-├── scripts/              # Build & deploy scripts
-├── docs/                 # Architecture & specification
-└── CLAUDE.md             # AI agent context (read this first!)
+│       ├── lib.rs              # entrypoint + 1-byte-tag dispatch
+│       ├── constants.rs        # PDA seeds, well-known program ids, params
+│       ├── error.rs            # ProtocolError → ProgramError::Custom(u32)
+│       ├── events.rs           # Borsh + base64 event emit ("Program log: EVT:…")
+│       ├── safety/             # signer / owner / PDA / discriminator helpers
+│       ├── instructions/       # one process(...) per instruction
+│       ├── state/              # PoolState, QuoteNonceMarker, AdminRotationProposal
+│       └── math/               # curve, ed25519 sysvar parser, WAD reserve
+├── sdk/                   # @cipher-quants/sdk — TS SDK (no Anchor runtime)
+├── app/                   # Next.js frontend (Wallet Adapter + RFQ + curve sim)
+├── keeper/                # Deno oracle pusher
+├── api/                   # Deno RFQ webhook (JupiterZ-compatible)
+├── tests/                 # Jest integration suite (49 cases)
+├── scripts/               # build / test / validator / measure-cu
+├── docs/                  # SPECIFICATION + ARCHITECTURE + OPERATIONS + INCIDENT + PERFORMANCE
+└── CLAUDE.md              # AI-agent operating manual (read first)
 ```
 
-## Working with AI
+## Working with AI agents
 
-This boilerplate is designed for AI-assisted development. The key files:
+`CLAUDE.md` is the operating manual loaded by Claude Code at every session.
+It encodes:
 
-1. **`CLAUDE.md`** — AI reads this automatically every session. Contains project rules, patterns, and architecture.
-2. **`docs/SPECIFICATION.md`** — Define your instructions here before asking AI to implement them.
-3. **`docs/ARCHITECTURE.md`** — Document account model and PDA seeds.
+- the Pinocchio handler pattern (slice destructure → `safety::verify_*` → state
+  load/mutate/store → emit) and the **safety-helper checklist that replaces
+  Anchor's `#[derive(Accounts)]`** — missing any check there is silently
+  exploitable.
+- error-code categories, PDA-seed table, CU budget.
+- critical operational rules (no `anchor build`/`anchor test`, no `.env` commits,
+  always `checked_*` math).
 
-### Recommended workflow:
+Recommended workflow:
 
-1. Write the spec in `docs/SPECIFICATION.md`
-2. Update `CLAUDE.md` with architecture decisions
-3. Ask AI to implement one instruction at a time
-4. Run tests, feed results back to AI
-5. Repeat
+1. Define / update the on-chain semantics in `docs/SPECIFICATION.md`.
+2. Update `CLAUDE.md` if architecture or PDA seeds change.
+3. Ask AI to implement one instruction at a time, following the helper
+   checklist.
+4. Run `cargo test -p protocol --lib` for unit-level signals, then
+   `pnpm test` end-to-end.
+5. Re-baseline CU via `pnpm cu:measure` after CU-sensitive changes.
 
-See `CLAUDE.md` for detailed AI collaboration patterns.
-
-### Prompt Cheatsheet
-
-A one-page reference for writing effective AI prompts, SPECIFICATION.md checklists, and debugging templates:
-
-**[Prompt Cheatsheet (Gist)](https://gist.github.com/nulLeeKH/48137abfef05ab15d1482a8a2820c85a)**
-
-## Build for Different Networks
+## Build for different networks
 
 ```bash
-./scripts/build.sh mainnet    # Production build
-./scripts/build.sh devnet     # Devnet features enabled
-./scripts/build.sh localnet   # Local development
+./scripts/build.sh mainnet      # default — clean release build
+./scripts/build.sh devnet       # `--features devnet` (extended oracle staleness)
+./scripts/build.sh localnet     # same as mainnet today; kept as a separate hook
 ```
 
-## Related Tools
+The `mainnet` build is what gets deployed. The script prints program size and
+the deployment-rent estimate.
 
-| Tool | Description |
-|------|-------------|
-| [Helius MCP Server](https://github.com/helius-labs/mcp-server-helius) | 60+ Solana APIs integrated directly into Claude Code via MCP |
-| [Solana Fender](https://github.com/nicola-attico/solana-fender) | Static analysis tool for Anchor programs — catches common vulnerabilities |
-| [SendAI Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit) | 60+ pre-built Solana actions for SDK and bot development |
-| [Código AI](https://www.codigo.ai/) | Generate Anchor boilerplate from CIDL (Código Interface Description Language) |
+## Related tools
+
+| Tool                                                                                  | Use                                                                  |
+|---------------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| [Helius MCP Server](https://github.com/helius-labs/mcp-server-helius)                 | 60+ Solana APIs surfaced inside Claude Code via MCP                  |
+| [Solana Fender](https://github.com/nicola-attico/solana-fender)                       | Static analyser — was Anchor-focused; cross-check Pinocchio code by hand |
+| [SendAI Solana Agent Kit](https://github.com/sendaifun/solana-agent-kit)              | Prebuilt Solana actions for off-chain bot work                       |
 
 ## License
 

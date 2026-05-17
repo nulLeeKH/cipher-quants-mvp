@@ -1,71 +1,103 @@
-use anchor_lang::prelude::*;
+use borsh::BorshDeserialize;
+use pinocchio::{
+    cpi::{Seed, Signer},
+    sysvars::{clock::Clock, rent::Rent, Sysvar},
+    AccountView, Address, ProgramResult,
+};
+use pinocchio_system::instructions::CreateAccount;
 
-use crate::constants::*;
-use crate::error::ErrorCode;
-use crate::events::AdminProposalCreated;
+use crate::constants::{ADMIN_PROPOSAL_SEED, PROGRAM_ID};
+use crate::error::ProtocolError;
+use crate::events::{emit_admin_proposal_created, AdminProposalCreated};
+use crate::safety::{verify_owner_program, verify_signer, verify_writable};
 use crate::state::{AdminRotationProposal, PoolState};
 
 // docs/SPECIFICATION.md §3.7 — 2-step rotation, step 1 (propose).
-//
-// Mistype risk on `rotate_admin` (single-step) made the admin key a
-// permanent-lock footgun. The 2-step flow forces the proposed admin to
-// actively sign `accept_admin` before privileges transfer.
 
-#[derive(Accounts)]
-pub struct ProposeAdmin<'info> {
-    #[account(mut)]
-    pub admin: Signer<'info>,
-
-    #[account(
-        has_one = admin @ ErrorCode::UnauthorizedAdmin,
-    )]
-    pub pool_state: Account<'info, PoolState>,
-
-    /// Per-pool proposal PDA. `init` here — re-proposing requires cancelling
-    /// the existing proposal first (system_program::create_account fails on
-    /// pre-existing accounts), which makes accidental overwrite impossible.
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + AdminRotationProposal::INIT_SPACE,
-        seeds = [ADMIN_PROPOSAL_SEED, pool_state.key().as_ref()],
-        bump,
-    )]
-    pub admin_proposal: Account<'info, AdminRotationProposal>,
-
-    pub system_program: Program<'info, System>,
+#[derive(BorshDeserialize)]
+pub struct ProposeAdminArgs {
+    pub new_admin: Address,
 }
 
-pub fn process_propose_admin(
-    ctx: Context<ProposeAdmin>,
-    new_admin: Pubkey,
-) -> Result<()> {
-    // Phase 1: validation
-    require!(
-        new_admin != Pubkey::default(),
-        ErrorCode::InvalidNewAdmin
-    );
-    require!(
-        new_admin != ctx.accounts.pool_state.admin,
-        ErrorCode::InvalidNewAdmin
-    );
+/// Accounts (positional):
+///   0. admin           — signer, writable (pays rent)
+///   1. pool_state      — owned by this program (admin check)
+///   2. admin_proposal  — writable, uninitialized PDA (will be allocated)
+///   3. system_program  — `11111111111111111111111111111111`
+pub fn process(
+    _program_id: &Address,
+    accounts: &mut [AccountView],
+    ix_data: &[u8],
+) -> ProgramResult {
+    let args = ProposeAdminArgs::try_from_slice(ix_data)
+        .map_err(|_| ProtocolError::InvalidInstructionData)?;
+
+    let [admin_info, pool_info, proposal_info, _system_program_info, _rest @ ..] = accounts else {
+        return Err(ProtocolError::NotEnoughAccountKeys.into());
+    };
+
+    verify_signer(admin_info)?;
+    verify_writable(admin_info)?;
+    verify_writable(proposal_info)?;
+    verify_owner_program(pool_info, &PROGRAM_ID)?;
+
+    let pool = PoolState::from_account_view(pool_info)?;
+    if &pool.admin != admin_info.address() {
+        return Err(ProtocolError::UnauthorizedAdmin.into());
+    }
+    if args.new_admin == Address::default() || args.new_admin == pool.admin {
+        return Err(ProtocolError::InvalidNewAdmin.into());
+    }
+
+    let pool_key = *pool_info.address();
+    let (expected_pda, bump) =
+        Address::find_program_address(&[ADMIN_PROPOSAL_SEED, pool_key.as_ref()], &PROGRAM_ID);
+    if &expected_pda != proposal_info.address() {
+        return Err(ProtocolError::WrongPda.into());
+    }
+    if !proposal_info.is_data_empty() || proposal_info.lamports() != 0 {
+        // Already initialized — caller must cancel first.
+        return Err(ProtocolError::InvalidNewAdmin.into());
+    }
+
+    let space = AdminRotationProposal::ACCOUNT_SIZE;
+    let rent_lamports = Rent::get()?.try_minimum_balance(space)?;
+
+    let bump_arr = [bump];
+    let seeds = [
+        Seed::from(ADMIN_PROPOSAL_SEED),
+        Seed::from(pool_key.as_ref()),
+        Seed::from(bump_arr.as_ref()),
+    ];
+    let signer = Signer::from(&seeds);
+    CreateAccount {
+        from: admin_info,
+        to: proposal_info,
+        lamports: rent_lamports,
+        space: space as u64,
+        owner: &PROGRAM_ID,
+    }
+    .invoke_signed(&[signer])?;
 
     let slot = Clock::get()?.slot;
-    let pool_key = ctx.accounts.pool_state.key();
-
-    // Phase 3: state
-    let proposal = &mut ctx.accounts.admin_proposal;
-    proposal.pool = pool_key;
-    proposal.proposed_by = ctx.accounts.admin.key();
-    proposal.new_admin = new_admin;
-    proposal.created_slot = slot;
-    proposal.bump = ctx.bumps.admin_proposal;
-    proposal._reserved = [0; 7];
-
-    emit!(AdminProposalCreated {
+    let admin_key = *admin_info.address();
+    let proposal = AdminRotationProposal {
         pool: pool_key,
-        proposed_by: ctx.accounts.admin.key(),
-        new_admin,
+        proposed_by: admin_key,
+        new_admin: args.new_admin,
+        created_slot: slot,
+        bump,
+        _reserved: [0; 7],
+    };
+    {
+        let mut data = proposal_info.try_borrow_mut()?;
+        proposal.store(&mut data)?;
+    }
+
+    emit_admin_proposal_created(&AdminProposalCreated {
+        pool: pool_key,
+        proposed_by: admin_key,
+        new_admin: args.new_admin,
         slot,
     });
 

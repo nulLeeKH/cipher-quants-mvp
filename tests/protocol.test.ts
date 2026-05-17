@@ -1,5 +1,12 @@
-import * as anchor from "@coral-xyz/anchor";
 import { getAccount, transfer } from "@solana/spl-token";
+import {
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
+  SYSVAR_RENT_PUBKEY,
+  Transaction,
+} from "@solana/web3.js";
 
 import {
   setupTestContext,
@@ -12,8 +19,8 @@ import {
   TOKEN_PROGRAM_ID,
   TestContext,
 } from "./helpers/setup";
-// Import SDK directly — no duplicate helpers.
 import {
+  BN,
   derivePoolState,
   deriveVault,
   deriveQuoteNonceMarker,
@@ -25,7 +32,7 @@ import {
   PRICE_SCALE,
 } from "../sdk/dist";
 
-const FAIR = new anchor.BN(100_000_000); // $100 × PRICE_SCALE(1e6)
+const FAIR = new BN(100_000_000); // $100 × PRICE_SCALE(1e6)
 const SPREAD_BPS = 20;
 const TTL_MODE_B = 3;
 
@@ -38,8 +45,8 @@ const TTL_MODE_B = 3;
 // silently rejected on-chain.
 describe("Borsh parity (SignedQuoteMessage)", () => {
   it("SDK serializer matches the golden bytes used by on-chain Rust test", () => {
-    const pool = new anchor.web3.PublicKey(new Uint8Array(32).fill(0x01));
-    const user = new anchor.web3.PublicKey(new Uint8Array(32).fill(0x02));
+    const pool = new PublicKey(new Uint8Array(32).fill(0x01));
+    const user = new PublicKey(new Uint8Array(32).fill(0x02));
     const bytes = serializeSignedQuoteMessage({
       pool,
       user,
@@ -66,8 +73,8 @@ describe("Borsh parity (SignedQuoteMessage)", () => {
   });
 
   it("Side::Buy = 0 (matches on-chain Borsh enum discriminant)", () => {
-    const pool = new anchor.web3.PublicKey(new Uint8Array(32).fill(0));
-    const user = new anchor.web3.PublicKey(new Uint8Array(32).fill(0));
+    const pool = new PublicKey(new Uint8Array(32).fill(0));
+    const user = new PublicKey(new Uint8Array(32).fill(0));
     const bytes = serializeSignedQuoteMessage({
       pool,
       user,
@@ -83,26 +90,26 @@ describe("Borsh parity (SignedQuoteMessage)", () => {
 
 describe("Protocol", () => {
   let ctx: TestContext;
-  let admin: anchor.web3.Keypair;
-  let oracleSigner: anchor.web3.Keypair;
-  let user: anchor.web3.Keypair;
+  let admin: Keypair;
+  let oracleSigner: Keypair;
+  let user: Keypair;
 
   // Sorted such that base < quote.
-  let baseMint: anchor.web3.PublicKey;
-  let quoteMint: anchor.web3.PublicKey;
-  let poolState: anchor.web3.PublicKey;
-  let baseVault: anchor.web3.PublicKey;
-  let quoteVault: anchor.web3.PublicKey;
-  let adminBaseAta: anchor.web3.PublicKey;
-  let adminQuoteAta: anchor.web3.PublicKey;
-  let userBaseAta: anchor.web3.PublicKey;
-  let userQuoteAta: anchor.web3.PublicKey;
+  let baseMint: PublicKey;
+  let quoteMint: PublicKey;
+  let poolState: PublicKey;
+  let baseVault: PublicKey;
+  let quoteVault: PublicKey;
+  let adminBaseAta: PublicKey;
+  let adminQuoteAta: PublicKey;
+  let userBaseAta: PublicKey;
+  let userQuoteAta: PublicKey;
 
   beforeAll(async () => {
     ctx = await setupTestContext();
-    admin = anchor.web3.Keypair.generate();
-    oracleSigner = anchor.web3.Keypair.generate();
-    user = anchor.web3.Keypair.generate();
+    admin = Keypair.generate();
+    oracleSigner = Keypair.generate();
+    user = Keypair.generate();
 
     await Promise.all([
       fundAccount(ctx.provider, admin.publicKey, 50),
@@ -207,8 +214,8 @@ describe("Protocol", () => {
           baseVault,
           quoteVault,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
         })
         .signers([admin])
         .rpc();
@@ -244,8 +251,8 @@ describe("Protocol", () => {
             baseVault,
             quoteVault,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
           })
           .signers([admin])
           .rpc()
@@ -254,7 +261,7 @@ describe("Protocol", () => {
 
     it("rejects mints not sorted (base > quote)", async () => {
       // Try a different admin/mint pair, but with swapped order → MintsNotSorted.
-      const otherAdmin = anchor.web3.Keypair.generate();
+      const otherAdmin = Keypair.generate();
       await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -282,8 +289,8 @@ describe("Protocol", () => {
             baseVault: wrongBaseVault,
             quoteVault: wrongQuoteVault,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
           })
           .signers([otherAdmin])
           .rpc()
@@ -291,7 +298,7 @@ describe("Protocol", () => {
     });
 
     it("rejects fair_value = 0", async () => {
-      const otherAdmin = anchor.web3.Keypair.generate();
+      const otherAdmin = Keypair.generate();
       await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -304,7 +311,7 @@ describe("Protocol", () => {
         ctx.program.methods
           .initPool(
             oracleSigner.publicKey,
-            new anchor.BN(0),
+            new BN(0),
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
@@ -318,8 +325,8 @@ describe("Protocol", () => {
             baseVault: bv,
             quoteVault: qv,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
           })
           .signers([otherAdmin])
           .rpc()
@@ -327,7 +334,7 @@ describe("Protocol", () => {
     });
 
     it("rejects spread > MAX_SPREAD_BPS", async () => {
-      const otherAdmin = anchor.web3.Keypair.generate();
+      const otherAdmin = Keypair.generate();
       await fundAccount(ctx.provider, otherAdmin.publicKey, 20);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -354,8 +361,8 @@ describe("Protocol", () => {
             baseVault: bv,
             quoteVault: qv,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
           })
           .signers([otherAdmin])
           .rpc()
@@ -363,7 +370,7 @@ describe("Protocol", () => {
     });
 
     it("emits PoolInitialized event", async () => {
-      const newAdmin = anchor.web3.Keypair.generate();
+      const newAdmin = Keypair.generate();
       await fundAccount(ctx.provider, newAdmin.publicKey, 20);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -389,8 +396,8 @@ describe("Protocol", () => {
           baseVault: bv,
           quoteVault: qv,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
         })
         .signers([newAdmin])
         .rpc();
@@ -421,7 +428,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(1), // nonce
+          new BN(1), // nonce
           TTL_MODE_B // Mode B
         )
         .accountsPartial({
@@ -444,7 +451,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
-            new anchor.BN(1), // already 1 — violates the monotonic rule
+            new BN(1), // already 1 — violates the monotonic rule
             TTL_MODE_B
           )
           .accountsPartial({
@@ -457,7 +464,7 @@ describe("Protocol", () => {
     });
 
     it("rejects unauthorized signer", async () => {
-      const fake = anchor.web3.Keypair.generate();
+      const fake = Keypair.generate();
       await fundAccount(ctx.provider, fake.publicKey, 1);
       await expect(
         ctx.program.methods
@@ -466,7 +473,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
-            new anchor.BN(2),
+            new BN(2),
             TTL_MODE_B
           )
           .accountsPartial({
@@ -527,7 +534,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(oracleNonceCounter),
+          new BN(oracleNonceCounter),
           TTL_MODE_B
         )
         .accountsPartial({
@@ -539,8 +546,8 @@ describe("Protocol", () => {
     });
 
     it("Buy succeeds (input quote → output base)", async () => {
-      const inputAmount = new anchor.BN(100_000); // 0.1 quote
-      const minOutput = new anchor.BN(0);
+      const inputAmount = new BN(100_000); // 0.1 quote
+      const minOutput = new BN(0);
 
       const userBaseBefore = (
         await getAccount(ctx.provider.connection, userBaseAta)
@@ -559,8 +566,8 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .signers([user])
         .rpc();
@@ -579,8 +586,8 @@ describe("Protocol", () => {
     });
 
     it("Sell succeeds (input base → output quote)", async () => {
-      const inputAmount = new anchor.BN(1_000); // 0.001 base
-      const minOutput = new anchor.BN(0);
+      const inputAmount = new BN(1_000); // 0.001 base
+      const minOutput = new BN(0);
 
       const userBaseBefore = (
         await getAccount(ctx.provider.connection, userBaseAta)
@@ -599,8 +606,8 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .signers([user])
         .rpc();
@@ -619,8 +626,8 @@ describe("Protocol", () => {
     });
 
     it("rejects slippage (min_output too high)", async () => {
-      const inputAmount = new anchor.BN(1_000);
-      const minOutput = new anchor.BN(10n ** 18n); // unreasonable
+      const inputAmount = new BN(1_000);
+      const minOutput = new BN(10n ** 18n); // unreasonable
 
       await expect(
         ctx.program.methods
@@ -633,8 +640,8 @@ describe("Protocol", () => {
             userBaseAta,
             userQuoteAta,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
           .signers([user])
           .rpc()
@@ -644,7 +651,7 @@ describe("Protocol", () => {
     it("rejects input_amount = 0", async () => {
       await expect(
         ctx.program.methods
-          .executeSwap(new anchor.BN(0), { sell: {} }, new anchor.BN(0), null)
+          .executeSwap(new BN(0), { sell: {} }, new BN(0), null)
           .accountsPartial({
             user: user.publicKey,
             poolState,
@@ -653,8 +660,8 @@ describe("Protocol", () => {
             userBaseAta,
             userQuoteAta,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
           .signers([user])
           .rpc()
@@ -693,9 +700,9 @@ describe("Protocol", () => {
       ).amount;
       await ctx.program.methods
         .executeSwap(
-          new anchor.BN(inputAmount.toString()),
+          new BN(inputAmount.toString()),
           { sell: {} },
-          new anchor.BN(0),
+          new BN(0),
           null
         )
         .accountsPartial({
@@ -706,8 +713,8 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .signers([user])
         .rpc();
@@ -720,9 +727,9 @@ describe("Protocol", () => {
     });
 
     it("emits SwapExecuted event with mode=0 (curve)", async () => {
-      const inputAmount = new anchor.BN(1_000);
+      const inputAmount = new BN(1_000);
       const sig = await ctx.program.methods
-        .executeSwap(inputAmount, { sell: {} }, new anchor.BN(0), null)
+        .executeSwap(inputAmount, { sell: {} }, new BN(0), null)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -731,8 +738,8 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .signers([user])
         .rpc();
@@ -785,7 +792,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(30), // safely larger than the curve-fresh describe's beforeEach counter (~16)
+          new BN(30), // safely larger than the curve-fresh describe's beforeEach counter (~16)
           TTL_MODE_B         // **operating value: Mode B=3**
         )
         .accountsPartial({
@@ -796,9 +803,9 @@ describe("Protocol", () => {
 
       const swapIx = await ctx.program.methods
         .executeSwap(
-          new anchor.BN(1_000),
+          new BN(1_000),
           { sell: {} },
-          new anchor.BN(0),
+          new BN(0),
           signedQuote
         )
         .accountsPartial({
@@ -809,8 +816,8 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([
           { pubkey: marker, isSigner: false, isWritable: true },
@@ -818,7 +825,7 @@ describe("Protocol", () => {
         .instruction();
 
       // Order: oracleIx(0) → verifyIx(1) → swapIx(2). swapIx's previous instruction is verifyIx.
-      const tx = new anchor.web3.Transaction()
+      const tx = new Transaction()
         .add(oracleIx)
         .add(verifyIx)
         .add(swapIx);
@@ -852,7 +859,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(35), // > 30 (the §3.1 describe's oracleIx nonce)
+          new BN(35), // > 30 (the §3.1 describe's oracleIx nonce)
           0 // Mode C — force the curve stale
         )
         .accountsPartial({
@@ -866,7 +873,7 @@ describe("Protocol", () => {
     it("rejects swap without signed quote (curve stale)", async () => {
       await expect(
         ctx.program.methods
-          .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), null)
+          .executeSwap(new BN(1_000), { sell: {} }, new BN(0), null)
           .accountsPartial({
             user: user.publicKey,
             poolState,
@@ -875,8 +882,8 @@ describe("Protocol", () => {
             userBaseAta,
             userQuoteAta,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
           .signers([user])
           .rpc()
@@ -907,9 +914,9 @@ describe("Protocol", () => {
 
       const swapIx = await ctx.program.methods
         .executeSwap(
-          new anchor.BN(inputAmount.toString()),
+          new BN(inputAmount.toString()),
           { sell: {} },
-          new anchor.BN(0),
+          new BN(0),
           signedQuote
         )
         .accountsPartial({
@@ -920,15 +927,15 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([
           { pubkey: marker, isSigner: false, isWritable: true },
         ])
         .instruction();
 
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await ctx.provider.sendAndConfirm(tx, [user]);
 
       // The quote_nonce_marker has been initialized (replay block in place).
@@ -941,7 +948,7 @@ describe("Protocol", () => {
     it("rejects RFQ with wrong user", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 1001n;
-      const fakeUser = anchor.web3.Keypair.generate();
+      const fakeUser = Keypair.generate();
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
         oracleSigner,
         {
@@ -956,7 +963,7 @@ describe("Protocol", () => {
       );
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey, // actual tx signer is `user`, which mismatches the quote's user
           poolState,
@@ -965,12 +972,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow();
     });
 
@@ -993,9 +1000,9 @@ describe("Protocol", () => {
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(
-          new anchor.BN(1_000),
+          new BN(1_000),
           { buy: {} }, // direction mismatch
-          new anchor.BN(0),
+          new BN(0),
           signedQuote
         )
         .accountsPartial({
@@ -1006,12 +1013,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
         /QuoteDirectionMismatch/
       );
@@ -1031,7 +1038,7 @@ describe("Protocol", () => {
       });
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -1040,13 +1047,13 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
       // verifyIx is intentionally NOT attached
-      const tx = new anchor.web3.Transaction().add(swapIx);
+      const tx = new Transaction().add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
         /QuoteSignatureInvalid/
       );
@@ -1055,7 +1062,7 @@ describe("Protocol", () => {
     it("rejects RFQ quote signed by wrong key", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 1005n;
-      const fakeSigner = anchor.web3.Keypair.generate();
+      const fakeSigner = Keypair.generate();
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
         fakeSigner, // a key other than authorized_oracle_signer
         {
@@ -1070,7 +1077,7 @@ describe("Protocol", () => {
       );
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -1079,12 +1086,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
         /QuoteSignatureInvalid/
       );
@@ -1107,7 +1114,7 @@ describe("Protocol", () => {
       );
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -1116,12 +1123,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(/QuoteExpired/);
     });
 
@@ -1144,9 +1151,9 @@ describe("Protocol", () => {
 
       const swapIx = await ctx.program.methods
         .executeSwap(
-          new anchor.BN(1_000),
+          new BN(1_000),
           { sell: {} },
-          new anchor.BN(0),
+          new BN(0),
           signedQuote
         )
         .accountsPartial({
@@ -1157,15 +1164,15 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([
           { pubkey: marker, isSigner: false, isWritable: true },
         ])
         .instruction();
 
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(
         ctx.provider.sendAndConfirm(tx, [user])
       ).rejects.toThrow();
@@ -1195,7 +1202,7 @@ describe("Protocol", () => {
     });
 
     it("rejects non-admin", async () => {
-      const fake = anchor.web3.Keypair.generate();
+      const fake = Keypair.generate();
       await fundAccount(ctx.provider, fake.publicKey, 1);
       await expect(
         ctx.program.methods
@@ -1217,7 +1224,7 @@ describe("Protocol", () => {
       // execute_swap is rejected
       await expect(
         ctx.program.methods
-          .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), null)
+          .executeSwap(new BN(1_000), { sell: {} }, new BN(0), null)
           .accountsPartial({
             user: user.publicKey,
             poolState,
@@ -1226,8 +1233,8 @@ describe("Protocol", () => {
             userBaseAta,
             userQuoteAta,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
           .signers([user])
           .rpc()
@@ -1241,7 +1248,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
-            new anchor.BN(100),
+            new BN(100),
             8
           )
           .accountsPartial({
@@ -1266,7 +1273,7 @@ describe("Protocol", () => {
   // ==========================================================================
   describe("rotate_oracle_signer", () => {
     it("admin rotates signer + old signer immediately rejected", async () => {
-      const newSigner = anchor.web3.Keypair.generate();
+      const newSigner = Keypair.generate();
       await ctx.program.methods
         .rotateOracleSigner(newSigner.publicKey)
         .accountsPartial({ admin: admin.publicKey, poolState })
@@ -1286,7 +1293,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
-            new anchor.BN(50), // monotonic
+            new BN(50), // monotonic
             8
           )
           .accountsPartial({
@@ -1311,7 +1318,7 @@ describe("Protocol", () => {
   // ==========================================================================
   describe("rotate_admin", () => {
     it("admin rotates to new admin and back", async () => {
-      const newAdmin = anchor.web3.Keypair.generate();
+      const newAdmin = Keypair.generate();
       await fundAccount(ctx.provider, newAdmin.publicKey, 5);
 
       // 1) admin → newAdmin
@@ -1336,7 +1343,7 @@ describe("Protocol", () => {
     });
 
     it("rejects non-admin", async () => {
-      const fake = anchor.web3.Keypair.generate();
+      const fake = Keypair.generate();
       await fundAccount(ctx.provider, fake.publicKey, 1);
       await expect(
         ctx.program.methods
@@ -1362,7 +1369,7 @@ describe("Protocol", () => {
 
       const withdrawAmt = 1_000n;
       await ctx.program.methods
-        .adminWithdrawInventory(new anchor.BN(withdrawAmt.toString()), new anchor.BN(0))
+        .adminWithdrawInventory(new BN(withdrawAmt.toString()), new BN(0))
         .accountsPartial({
           admin: admin.publicKey,
           poolState,
@@ -1386,11 +1393,11 @@ describe("Protocol", () => {
     });
 
     it("rejects non-admin", async () => {
-      const fake = anchor.web3.Keypair.generate();
+      const fake = Keypair.generate();
       await fundAccount(ctx.provider, fake.publicKey, 1);
       await expect(
         ctx.program.methods
-          .adminWithdrawInventory(new anchor.BN(1), new anchor.BN(0))
+          .adminWithdrawInventory(new BN(1), new BN(0))
           .accountsPartial({
             admin: fake.publicKey,
             poolState,
@@ -1409,7 +1416,7 @@ describe("Protocol", () => {
       const vaultBefore = (await getAccount(ctx.provider.connection, quoteVault)).amount;
       const withdrawAmt = 500n;
       await ctx.program.methods
-        .adminWithdrawInventory(new anchor.BN(0), new anchor.BN(withdrawAmt.toString()))
+        .adminWithdrawInventory(new BN(0), new BN(withdrawAmt.toString()))
         .accountsPartial({
           admin: admin.publicKey,
           poolState,
@@ -1435,7 +1442,7 @@ describe("Protocol", () => {
 
       // admin_withdraw succeeds even when paused
       await ctx.program.methods
-        .adminWithdrawInventory(new anchor.BN(100), new anchor.BN(0))
+        .adminWithdrawInventory(new BN(100), new BN(0))
         .accountsPartial({
           admin: admin.publicKey,
           poolState,
@@ -1497,7 +1504,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             defaultSkewParams(),
-            new anchor.BN(99_001),
+            new BN(99_001),
             9 // MAX_TTL_SLOTS=8
           )
           .accountsPartial({
@@ -1515,7 +1522,7 @@ describe("Protocol", () => {
     it("update_oracle rejects depth.max_depth_bps > MAX_DEPTH_BPS (InvalidDepthParams)", async () => {
       const badDepth = {
         depthCoefBps: 2,
-        sizeUnit: new anchor.BN(1_000_000),
+        sizeUnit: new BN(1_000_000),
         maxDepthBps: 501, // MAX_DEPTH_BPS=500
         reserved: Array(6).fill(0),
       };
@@ -1526,7 +1533,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             badDepth,
             defaultSkewParams(),
-            new anchor.BN(99_010),
+            new BN(99_010),
             TTL_MODE_B
           )
           .accountsPartial({
@@ -1541,7 +1548,7 @@ describe("Protocol", () => {
     it("update_oracle rejects depth.size_unit == 0 (InvalidDepthParams)", async () => {
       const badDepth = {
         depthCoefBps: 2,
-        sizeUnit: new anchor.BN(0),
+        sizeUnit: new BN(0),
         maxDepthBps: 100,
         reserved: Array(6).fill(0),
       };
@@ -1552,7 +1559,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             badDepth,
             defaultSkewParams(),
-            new anchor.BN(99_011),
+            new BN(99_011),
             TTL_MODE_B
           )
           .accountsPartial({
@@ -1581,7 +1588,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             badSkew,
-            new anchor.BN(99_020),
+            new BN(99_020),
             TTL_MODE_B
           )
           .accountsPartial({
@@ -1607,7 +1614,7 @@ describe("Protocol", () => {
             SPREAD_BPS,
             defaultDepthParams(),
             badSkew,
-            new anchor.BN(99_021),
+            new BN(99_021),
             TTL_MODE_B
           )
           .accountsPartial({
@@ -1623,7 +1630,7 @@ describe("Protocol", () => {
     // 6108 InvalidOracleSignerKey — init_pool with zero pubkey
     // ---------------------------------------------------------------------
     it("init_pool rejects zero authorized_oracle_signer (InvalidOracleSignerKey)", async () => {
-      const tmpAdmin = anchor.web3.Keypair.generate();
+      const tmpAdmin = Keypair.generate();
       await fundAccount(ctx.provider, tmpAdmin.publicKey, 5);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -1635,7 +1642,7 @@ describe("Protocol", () => {
       await expect(
         ctx.program.methods
           .initPool(
-            anchor.web3.PublicKey.default, // zero pubkey
+            PublicKey.default, // zero pubkey
             FAIR,
             SPREAD_BPS,
             defaultDepthParams(),
@@ -1650,8 +1657,8 @@ describe("Protocol", () => {
             baseVault: tmpBv,
             quoteVault: tmpQv,
             tokenProgram: TOKEN_PROGRAM_ID,
-            systemProgram: anchor.web3.SystemProgram.programId,
-            rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+            systemProgram: SystemProgram.programId,
+            rent: SYSVAR_RENT_PUBKEY,
           })
           .signers([tmpAdmin])
           .rpc()
@@ -1670,7 +1677,7 @@ describe("Protocol", () => {
           SPREAD_BPS,
           defaultDepthParams(),
           defaultSkewParams(),
-          new anchor.BN(99_100),
+          new BN(99_100),
           0 // Mode C
         )
         .accountsPartial({
@@ -1682,7 +1689,7 @@ describe("Protocol", () => {
 
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 90_302n;
-      const fakePool = anchor.web3.Keypair.generate().publicKey;
+      const fakePool = Keypair.generate().publicKey;
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
         pool: fakePool, // wrong pool
         user: user.publicKey,
@@ -1694,7 +1701,7 @@ describe("Protocol", () => {
       });
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -1703,12 +1710,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(
         ctx.provider.sendAndConfirm(tx, [user])
       ).rejects.toThrow(/QuoteWrongPool/);
@@ -1732,9 +1739,9 @@ describe("Protocol", () => {
       const [marker] = deriveQuoteNonceMarker(poolState, nonce);
       const swapIx = await ctx.program.methods
         .executeSwap(
-          new anchor.BN(1_000), // but instruction passes 1000
+          new BN(1_000), // but instruction passes 1000
           { sell: {} },
-          new anchor.BN(0),
+          new BN(0),
           signedQuote
         )
         .accountsPartial({
@@ -1745,12 +1752,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
         /QuoteSizeMismatch/
       );
@@ -1773,7 +1780,7 @@ describe("Protocol", () => {
       });
       const [marker] = deriveQuoteNonceMarker(poolState, 1n);
       const swapIx = await ctx.program.methods
-        .executeSwap(new anchor.BN(1_000), { sell: {} }, new anchor.BN(0), signedQuote)
+        .executeSwap(new BN(1_000), { sell: {} }, new BN(0), signedQuote)
         .accountsPartial({
           user: user.publicKey,
           poolState,
@@ -1782,12 +1789,12 @@ describe("Protocol", () => {
           userBaseAta,
           userQuoteAta,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          instructionsSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .remainingAccounts([{ pubkey: marker, isSigner: false, isWritable: true }])
         .instruction();
-      const tx = new anchor.web3.Transaction().add(verifyIx).add(swapIx);
+      const tx = new Transaction().add(verifyIx).add(swapIx);
       await expect(ctx.provider.sendAndConfirm(tx, [user])).rejects.toThrow(
         /QuoteAlreadyUsed/
       );
@@ -1802,7 +1809,7 @@ describe("Protocol", () => {
       ).amount;
       await expect(
         ctx.program.methods
-          .adminWithdrawInventory(new anchor.BN((vaultAmt + 1n).toString()), new anchor.BN(0))
+          .adminWithdrawInventory(new BN((vaultAmt + 1n).toString()), new BN(0))
           .accountsPartial({
             admin: admin.publicKey,
             poolState,
@@ -1822,7 +1829,7 @@ describe("Protocol", () => {
     // ---------------------------------------------------------------------
     it("close_expired_nonce rejects when pool_state does not match marker.pool (WrongPool)", async () => {
       // Build a second pool to use as the wrong pool_state.
-      const otherAdmin = anchor.web3.Keypair.generate();
+      const otherAdmin = Keypair.generate();
       await fundAccount(ctx.provider, otherAdmin.publicKey, 5);
       const mintA = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
       const mintB = await createTestMint(ctx.provider, ctx.payer, 6, ctx.payer.publicKey);
@@ -1847,8 +1854,8 @@ describe("Protocol", () => {
           baseVault: otherBv,
           quoteVault: otherQv,
           tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+          systemProgram: SystemProgram.programId,
+          rent: SYSVAR_RENT_PUBKEY,
         })
         .signers([otherAdmin])
         .rpc();

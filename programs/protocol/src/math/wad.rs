@@ -7,9 +7,11 @@
 //!   lamports (u64, 9 decimals) → WAD (u128, 18 decimals) → compute → WAD → lamports
 //!
 //! Uses manual u256 multiplication to prevent overflow in large value operations.
+//!
+//! Currently unused in v0 (Linear-bps curve runs on u128 integer-ratio). Kept
+//! intact for the planned dynamic-spread / implied-vol work in v1+.
 
-use anchor_lang::prelude::*;
-use crate::error::ErrorCode;
+use crate::error::{ProtocolError, Result};
 
 pub const WAD: u128 = 1_000_000_000_000_000_000;
 pub const TOKEN_DECIMALS: u32 = 9;
@@ -18,7 +20,7 @@ pub const TOKEN_DECIMALS: u32 = 9;
 pub fn to_wad(n: u64) -> Result<u128> {
     (n as u128)
         .checked_mul(10u128.pow(TOKEN_DECIMALS))
-        .ok_or_else(|| Error::from(ErrorCode::MathOverflow))
+        .ok_or_else(|| ProtocolError::MathOverflow.into())
 }
 
 /// Multiplies two WAD values, returns a WAD result.
@@ -41,23 +43,23 @@ pub fn multiply_wad(a: u128, b: u128) -> Result<u128> {
     low = low_add;
 
     let mut high = hh;
-    high = high.checked_add(mid >> 64).ok_or(ErrorCode::MathOverflow)?;
+    high = high.checked_add(mid >> 64).ok_or(ProtocolError::MathOverflow)?;
     if overflow1 {
-        high = high.checked_add(1u128 << 64).ok_or(ErrorCode::MathOverflow)?;
+        high = high.checked_add(1u128 << 64).ok_or(ProtocolError::MathOverflow)?;
     }
     if overflow2 {
-        high = high.checked_add(1).ok_or(ErrorCode::MathOverflow)?;
+        high = high.checked_add(1).ok_or(ProtocolError::MathOverflow)?;
     }
 
     if high >= WAD {
-        return Err(Error::from(ErrorCode::MathOverflow));
+        return Err(ProtocolError::MathOverflow.into());
     }
 
     let quotient_hi = high / WAD;
     let remainder_hi = high % WAD;
 
     if quotient_hi > 0 {
-        return Err(Error::from(ErrorCode::MathOverflow));
+        return Err(ProtocolError::MathOverflow.into());
     }
 
     let result = if remainder_hi == 0 {
@@ -65,17 +67,19 @@ pub fn multiply_wad(a: u128, b: u128) -> Result<u128> {
     } else {
         let power_128_div_wad: u128 = 340282366920938463463u128;
 
-        let part1 = remainder_hi.checked_mul(power_128_div_wad)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let part1 = remainder_hi
+            .checked_mul(power_128_div_wad)
+            .ok_or(ProtocolError::MathOverflow)?;
 
         let power_128_mod_wad: u128 = 374607431768211456u128;
-        let numerator = remainder_hi.checked_mul(power_128_mod_wad)
-            .ok_or(ErrorCode::MathOverflow)?
+        let numerator = remainder_hi
+            .checked_mul(power_128_mod_wad)
+            .ok_or(ProtocolError::MathOverflow)?
             .checked_add(low)
-            .ok_or(ErrorCode::MathOverflow)?;
+            .ok_or(ProtocolError::MathOverflow)?;
         let part2 = numerator / WAD;
 
-        part1.checked_add(part2).ok_or(ErrorCode::MathOverflow)?
+        part1.checked_add(part2).ok_or(ProtocolError::MathOverflow)?
     };
 
     Ok(result)
@@ -101,46 +105,50 @@ pub fn multiply_wad_ceil(a: u128, b: u128) -> Result<u128> {
     low = low_add;
 
     let mut high = hh;
-    high = high.checked_add(mid >> 64).ok_or(ErrorCode::MathOverflow)?;
+    high = high.checked_add(mid >> 64).ok_or(ProtocolError::MathOverflow)?;
     if overflow1 {
-        high = high.checked_add(1u128 << 64).ok_or(ErrorCode::MathOverflow)?;
+        high = high.checked_add(1u128 << 64).ok_or(ProtocolError::MathOverflow)?;
     }
     if overflow2 {
-        high = high.checked_add(1).ok_or(ErrorCode::MathOverflow)?;
+        high = high.checked_add(1).ok_or(ProtocolError::MathOverflow)?;
     }
 
     if high >= WAD {
-        return Err(Error::from(ErrorCode::MathOverflow));
+        return Err(ProtocolError::MathOverflow.into());
     }
 
     let quotient_hi = high / WAD;
     let remainder_hi = high % WAD;
 
     if quotient_hi > 0 {
-        return Err(Error::from(ErrorCode::MathOverflow));
+        return Err(ProtocolError::MathOverflow.into());
     }
 
     let result = if remainder_hi == 0 {
-        let numerator = low.checked_add(WAD.checked_sub(1).ok_or(ErrorCode::MathUnderflow)?)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let numerator = low
+            .checked_add(WAD.checked_sub(1).ok_or(ProtocolError::MathUnderflow)?)
+            .ok_or(ProtocolError::MathOverflow)?;
         numerator / WAD
     } else {
         let power_128_div_wad: u128 = 340282366920938463463u128;
 
-        let part1 = remainder_hi.checked_mul(power_128_div_wad)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let part1 = remainder_hi
+            .checked_mul(power_128_div_wad)
+            .ok_or(ProtocolError::MathOverflow)?;
 
         let power_128_mod_wad: u128 = 374607431768211456u128;
-        let numerator = remainder_hi.checked_mul(power_128_mod_wad)
-            .ok_or(ErrorCode::MathOverflow)?
+        let numerator = remainder_hi
+            .checked_mul(power_128_mod_wad)
+            .ok_or(ProtocolError::MathOverflow)?
             .checked_add(low)
-            .ok_or(ErrorCode::MathOverflow)?;
+            .ok_or(ProtocolError::MathOverflow)?;
 
-        let numerator_ceil = numerator.checked_add(WAD.checked_sub(1).ok_or(ErrorCode::MathUnderflow)?)
-            .ok_or(ErrorCode::MathOverflow)?;
+        let numerator_ceil = numerator
+            .checked_add(WAD.checked_sub(1).ok_or(ProtocolError::MathUnderflow)?)
+            .ok_or(ProtocolError::MathOverflow)?;
         let part2 = numerator_ceil / WAD;
 
-        part1.checked_add(part2).ok_or(ErrorCode::MathOverflow)?
+        part1.checked_add(part2).ok_or(ProtocolError::MathOverflow)?
     };
 
     Ok(result)
@@ -149,32 +157,36 @@ pub fn multiply_wad_ceil(a: u128, b: u128) -> Result<u128> {
 /// Divides two WAD values, returns a WAD result.
 pub fn divide_wad(a: u128, b: u128) -> Result<u128> {
     if b == 0 {
-        return Err(Error::from(ErrorCode::MathError));
+        return Err(ProtocolError::MathError.into());
     }
 
-    let integer_part = a.checked_div(b)
-        .ok_or_else(|| Error::from(ErrorCode::MathError))?
-        .checked_mul(WAD)
-        .ok_or_else(|| Error::from(ErrorCode::MathOverflow))?;
-
-    let remainder = a.checked_rem(b)
-        .ok_or_else(|| Error::from(ErrorCode::MathError))?;
-
-    let fractional_part = remainder.checked_mul(WAD)
-        .ok_or_else(|| Error::from(ErrorCode::MathOverflow))?
+    let integer_part = a
         .checked_div(b)
-        .ok_or_else(|| Error::from(ErrorCode::MathError))?;
+        .ok_or(ProtocolError::MathError)?
+        .checked_mul(WAD)
+        .ok_or(ProtocolError::MathOverflow)?;
 
-    integer_part.checked_add(fractional_part)
-        .ok_or_else(|| Error::from(ErrorCode::MathOverflow))
+    let remainder = a.checked_rem(b).ok_or(ProtocolError::MathError)?;
+
+    let fractional_part = remainder
+        .checked_mul(WAD)
+        .ok_or(ProtocolError::MathOverflow)?
+        .checked_div(b)
+        .ok_or(ProtocolError::MathError)?;
+
+    integer_part
+        .checked_add(fractional_part)
+        .ok_or_else(|| ProtocolError::MathOverflow.into())
 }
 
 /// Converts a WAD value to lamports (9 decimals), rounding down (floor).
 /// Use when user RECEIVES tokens (protocol-protective).
 pub fn from_wad_floor(wad_value: u128) -> Result<u64> {
     let lamports_factor = 10u128.pow(TOKEN_DECIMALS);
-    let lamports = wad_value.checked_div(lamports_factor).ok_or(ErrorCode::MathError)?;
-    lamports.try_into().map_err(|_| ErrorCode::MathOverflow.into())
+    let lamports = wad_value
+        .checked_div(lamports_factor)
+        .ok_or(ProtocolError::MathError)?;
+    u64::try_from(lamports).map_err(|_| ProtocolError::MathOverflow.into())
 }
 
 /// Converts a WAD value to lamports (9 decimals), rounding up (ceiling).
@@ -183,10 +195,10 @@ pub fn from_wad_ceil(wad_value: u128) -> Result<u64> {
     let lamports_factor = 10u128.pow(TOKEN_DECIMALS);
     let lamports = wad_value
         .checked_add(lamports_factor - 1)
-        .ok_or(ErrorCode::MathOverflow)?
+        .ok_or(ProtocolError::MathOverflow)?
         .checked_div(lamports_factor)
-        .ok_or(ErrorCode::MathError)?;
-    lamports.try_into().map_err(|_| ErrorCode::MathOverflow.into())
+        .ok_or(ProtocolError::MathError)?;
+    u64::try_from(lamports).map_err(|_| ProtocolError::MathOverflow.into())
 }
 
 #[cfg(test)]
@@ -234,13 +246,12 @@ mod tests {
 
     #[test]
     fn test_from_wad_rounding() {
-        // 1.5 SOL in WAD = 1_500_000_000_000_000_000
         let wad_value = 1_500_000_000_000_000_001u128; // slightly over 1.5 SOL
 
         let floor = from_wad_floor(wad_value).unwrap();
         let ceil = from_wad_ceil(wad_value).unwrap();
 
         assert_eq!(floor, 1_500_000_000); // rounds down
-        assert_eq!(ceil, 1_500_000_001);  // rounds up
+        assert_eq!(ceil, 1_500_000_001); // rounds up
     }
 }

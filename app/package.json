@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@solana-boilerplate/sdk": "workspace:*",
+    "@cipher-quants/sdk": "workspace:*",
     "next": "^14.2.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -22,7 +22,6 @@
     "@solana-mobile/wallet-adapter-mobile": "^2.1.4",
     "@solana/web3.js": "^1.98.0",
     "@solana/spl-token": "^0.4.14",
-    "@coral-xyz/anchor": "^0.32.1",
     "bn.js": "^5.2.1",
     "jose": "^5.9.6",
     "tweetnacl": "^1.0.3",

@@ -1,51 +1,73 @@
-use anchor_lang::prelude::*;
+use pinocchio::{
+    sysvars::{clock::Clock, Sysvar},
+    AccountView, Address, ProgramResult,
+};
 
-use crate::constants::*;
-use crate::error::ErrorCode;
-use crate::events::AdminRotated;
+use crate::constants::{ADMIN_PROPOSAL_SEED, PROGRAM_ID};
+use crate::error::ProtocolError;
+use crate::events::{emit_admin_rotated, AdminRotated};
+use crate::safety::{
+    close_account, verify_owner_program, verify_pda_with_bump, verify_signer, verify_writable,
+};
 use crate::state::{AdminRotationProposal, PoolState};
 
 // docs/SPECIFICATION.md §3.7 — 2-step rotation, step 2 (accept).
-//
-// The proposed admin signs this; the actual admin transfer happens atomically
-// here and the proposal account is closed (rent refunded to the new admin).
 
-#[derive(Accounts)]
-pub struct AcceptAdmin<'info> {
-    #[account(mut)]
-    pub new_admin: Signer<'info>,
+/// Accounts (positional):
+///   0. new_admin       — signer, writable (rent destination)
+///   1. pool_state      — writable, owned by this program (admin updated)
+///   2. admin_proposal  — writable, owned by this program (closed)
+pub fn process(
+    _program_id: &Address,
+    accounts: &mut [AccountView],
+    _ix_data: &[u8],
+) -> ProgramResult {
+    let [new_admin_info, pool_info, proposal_info, _rest @ ..] = accounts else {
+        return Err(ProtocolError::NotEnoughAccountKeys.into());
+    };
 
-    #[account(mut)]
-    pub pool_state: Account<'info, PoolState>,
+    verify_signer(new_admin_info)?;
+    verify_writable(new_admin_info)?;
+    verify_writable(pool_info)?;
+    verify_writable(proposal_info)?;
+    verify_owner_program(pool_info, &PROGRAM_ID)?;
+    verify_owner_program(proposal_info, &PROGRAM_ID)?;
 
-    /// Proposal must (a) exist for this pool, (b) name `new_admin` as the
-    /// candidate, and (c) target the current pool admin so a stale proposal
-    /// from a previous admin can't be replayed across rotations.
-    #[account(
-        mut,
-        close = new_admin,
-        seeds = [ADMIN_PROPOSAL_SEED, pool_state.key().as_ref()],
-        bump = admin_proposal.bump,
-        constraint = admin_proposal.pool == pool_state.key() @ ErrorCode::WrongPool,
-        constraint = admin_proposal.new_admin == new_admin.key() @ ErrorCode::UnauthorizedAdmin,
-        constraint = admin_proposal.proposed_by == pool_state.admin @ ErrorCode::ProposalStale,
-    )]
-    pub admin_proposal: Account<'info, AdminRotationProposal>,
-}
+    let mut pool = PoolState::from_account_view(pool_info)?;
+    let proposal = AdminRotationProposal::from_account_view(proposal_info)?;
 
-pub fn process_accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
-    let previous_admin = ctx.accounts.pool_state.admin;
-    let new_admin = ctx.accounts.new_admin.key();
+    verify_pda_with_bump(
+        proposal_info,
+        &[ADMIN_PROPOSAL_SEED, pool_info.address().as_ref()],
+        proposal.bump,
+        &PROGRAM_ID,
+    )?;
+    if &proposal.pool != pool_info.address() {
+        return Err(ProtocolError::WrongPool.into());
+    }
+    if &proposal.new_admin != new_admin_info.address() {
+        return Err(ProtocolError::UnauthorizedAdmin.into());
+    }
+    // A stale proposal would carry an old `proposed_by` admin — reject so we
+    // don't replay rotations across an admin change.
+    if proposal.proposed_by != pool.admin {
+        return Err(ProtocolError::ProposalStale.into());
+    }
 
-    ctx.accounts.pool_state.admin = new_admin;
+    let previous_admin = pool.admin;
+    let new_admin = *new_admin_info.address();
+    pool.admin = new_admin;
+    pool.store_account_view(pool_info)?;
 
-    emit!(AdminRotated {
-        pool: ctx.accounts.pool_state.key(),
+    let pool_key = *pool_info.address();
+    close_account(proposal_info, new_admin_info)?;
+
+    emit_admin_rotated(&AdminRotated {
+        pool: pool_key,
         previous_admin,
         new_admin,
         slot: Clock::get()?.slot,
     });
 
-    // `close = new_admin` on the proposal account handles rent reclaim.
     Ok(())
 }

@@ -5,17 +5,22 @@
 // Keep in sync with docs/ARCHITECTURE.md §5.
 // ============================================================================
 
-import { Program } from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
-
-import { Protocol } from "../idl/protocol.js";
 
 import {
   POOL_SEED,
   VAULT_SEED,
   QUOTE_USED_SEED,
+  ADMIN_PROPOSAL_SEED,
 } from "../constants/index.js";
-import { PROGRAM_ID } from "../program.js";
+import {
+  PROGRAM_ID,
+  type Program,
+  derivePoolStatePda,
+  deriveVaultPda,
+  deriveAdminProposalPda,
+} from "../program.js";
+import { type PoolStateData } from "../borsh.js";
 
 /**
  * PoolState PDA. Seeds: [b"pool", base_mint, quote_mint].
@@ -26,10 +31,7 @@ export function derivePoolState(
   quoteMint: PublicKey,
   programId: PublicKey = PROGRAM_ID
 ): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [POOL_SEED, baseMint.toBuffer(), quoteMint.toBuffer()],
-    programId
-  );
+  return derivePoolStatePda(baseMint, quoteMint, programId);
 }
 
 /**
@@ -41,10 +43,7 @@ export function deriveVault(
   mint: PublicKey,
   programId: PublicKey = PROGRAM_ID
 ): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [VAULT_SEED, poolState.toBuffer(), mint.toBuffer()],
-    programId
-  );
+  return deriveVaultPda(poolState, mint, programId);
 }
 
 /**
@@ -63,6 +62,20 @@ export function deriveQuoteNonceMarker(
     programId
   );
 }
+
+/**
+ * AdminRotationProposal PDA. Seeds: [b"admin_proposal", pool_state].
+ */
+export function deriveAdminProposal(
+  poolState: PublicKey,
+  programId: PublicKey = PROGRAM_ID
+): [PublicKey, number] {
+  return deriveAdminProposalPda(poolState, programId);
+}
+
+// Re-export so older callers that imported the seed constants from `accounts/`
+// don't need to update their import paths.
+export { POOL_SEED, VAULT_SEED, QUOTE_USED_SEED, ADMIN_PROPOSAL_SEED };
 
 /**
  * Sort two mints lexicographically. Returns [base, quote] where base < quote.
@@ -92,8 +105,8 @@ export function sortMints(
 export interface PoolStateView {
   /** PDA address */
   address: PublicKey;
-  /** Decoded PoolState. Typed via IDL — use `state` to access fields. */
-  state: any;
+  /** Decoded PoolState. */
+  state: PoolStateData;
 }
 
 /**
@@ -102,12 +115,12 @@ export interface PoolStateView {
  * @throws If account is not initialized.
  */
 export async function fetchPoolState(
-  program: Program<Protocol>,
+  program: Program,
   baseMint: PublicKey,
   quoteMint: PublicKey
 ): Promise<PoolStateView> {
   const [address] = derivePoolState(baseMint, quoteMint, program.programId);
-  const state = await (program.account as any).poolState.fetch(address);
+  const state = await program.account.poolState.fetch(address);
   return { address, state };
 }
 
@@ -115,7 +128,7 @@ export async function fetchPoolState(
  * Fetch raw vault balances (base/quote). Used by the frontend before calling simulateSwap.
  */
 export async function fetchVaultBalances(
-  program: Program<Protocol>,
+  program: Program,
   poolState: PublicKey,
   baseMint: PublicKey,
   quoteMint: PublicKey

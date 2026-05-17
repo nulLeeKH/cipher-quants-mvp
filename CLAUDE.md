@@ -45,20 +45,20 @@ assets. Not production — the output is research data, not a live product.
 - **C** RFQ Only: TTL=0, no push, market closed / low-vol
 
 ### Tech Stack (locked)
-- On-chain: Rust + Anchor 0.32.1, SPL Token classic
-- SDK: TypeScript (CommonJS) — instruction builder, RFQ quote serialize/verify, ed25519 prepend, curve simulate
+- On-chain: Rust + **Pinocchio 0.11** (zero-dep Anza framework — replaces Anchor 0.32.1; rationale in [docs/ARCHITECTURE.md §0.1](docs/ARCHITECTURE.md)). SPL Token classic via `pinocchio-token`.
+- SDK: TypeScript (CommonJS) — hand-rolled Borsh codecs + Anchor-shaped `Program` shim on top of the 1-byte-tag + Borsh dispatch (drops `@coral-xyz/anchor` at runtime). Instruction builders, RFQ quote serialize/verify, ed25519 prepend, curve simulate.
 - Frontend: Next.js 14 + Solana Wallet Adapter — admin dashboard + user swap UI. **Mobile-first** (Tailwind responsive). English only. Wallet support: Phantom / Solflare / Backpack / **Ledger** / **Saga (Solana Mobile)** / Wallet Standard. Admin auth is a transaction-based challenge (Ledger-compatible, SIWS fallback).
 - Keeper: **Deno** — *oracle pusher only* (calls update_oracle while Mode A/B is active).
 - API server: **Deno + Hono** — RFQ webhook running 24/7 (especially during Mode C windows).
-- Tests: Jest + ts-jest
+- Tests: Jest + ts-jest (drives `solana-test-validator` via `scripts/test.sh`; no `anchor test` orchestrator).
 
 ### Monorepo Layout
-- `programs/protocol/` — on-chain settlement program (8 instructions)
-- `sdk/` — TypeScript SDK (shared)
+- `programs/protocol/` — on-chain settlement program (11 instructions: init_pool, update_oracle, execute_swap, set_paused, rotate_oracle_signer, rotate_admin, admin_withdraw_inventory, close_expired_nonce, propose_admin, accept_admin, cancel_admin_proposal)
+- `sdk/` — TypeScript SDK (shared). Pinocchio-era port — no `@coral-xyz/anchor` runtime dep; exports an Anchor-shaped `Program` shim for back-compat.
 - `app/` — Next.js frontend (admin + user UI). Screen breakdown in [docs/OPERATIONS.md §14](docs/OPERATIONS.md)
 - `keeper/` — Deno oracle pusher. Only runs while Mode A/B is active.
 - `api/` — Deno HTTP server (RFQ webhook, JupiterZ-compatible). 24/7.
-- `tests/` — Integration tests (Jest + Anchor)
+- `tests/` — Integration tests (Jest, drives the SDK shim against a local validator).
 - `TODO.md` — tracks external dependencies (data sources, Backed Finance, Jupiter integration split)
 
 > **Keeper vs API server — responsibility split**:
@@ -80,12 +80,15 @@ should read them in this order:
 ## Development Commands
 
 ```bash
-# Build
-anchor build
+# Build (BPF .so via cargo build-sbf — no anchor build)
+./scripts/build.sh             # mainnet (default)
 ./scripts/build.sh devnet      # devnet features enabled
-./scripts/build.sh mainnet     # production build
+./scripts/build.sh localnet    # localnet
 
-# Test
+# Rust unit tests (host, ~0.1s; runs math + Borsh parity)
+cargo test -p protocol --lib
+
+# Integration tests (validator + jest)
 pnpm test
 pnpm test -- --testPathPattern="my_test.test.ts"  # specific test
 
@@ -94,14 +97,15 @@ cat test_result.json | jq '.numPassedTests, .numFailedTests'
 cat test_result.json | jq '.testResults[].assertionResults[] | select(.status == "failed")'
 
 # SDK
-cd sdk && pnpm build
-cd sdk && pnpm dev             # watch mode
+pnpm sdk:build
+pnpm sdk:dev                   # watch mode
 
-# Keeper
-cd keeper && deno task dev
+# Keeper / API
+pnpm keeper:dev
+pnpm api:dev
 
 # Program logs (after tests)
-grep "consumed" .anchor/program-logs/*.log
+grep "consumed" .anchor/validator.log
 ```
 
 ## Milestones
@@ -131,13 +135,15 @@ Spec v1 finalized → **about to enter Week 1–2 infra setup + code scaffolding
 
 ## ⚠️ Critical Rules
 
-- **DO NOT run tests directly.** Tests take 3+ minutes (validator start → deploy → Jest). Ask the user to run them, then read `test_result.json` for results.
-- **DO NOT use `anchor test` directly.** Use `pnpm test` instead.
-  - **Why:** `pnpm test` runs the configured `package.json "test"` script, which includes `--features` flags (e.g., `anchor test -- --features devnet,test-feature`). Running bare `anchor test` skips those flags → program compiles with wrong settings → tests fail in hard-to-diagnose ways.
-  - **Rule:** If you add `[features]` to `Cargo.toml`, update `package.json "test"` to pass them: `"anchor test -- --features your-feature"`.
+- **DO NOT run integration tests directly.** They take 3+ minutes (validator start → deploy → Jest). Ask the user to run them, then read `test_result.json` for results. `cargo test -p protocol --lib` (Rust unit tests on host) finishes in <1s and is safe to run.
+- **DO NOT use `anchor test` / `anchor build`.** The project is Pinocchio. Use:
+  - `./scripts/build.sh [mainnet|devnet|localnet]` (BPF build — wraps `cargo build-sbf`)
+  - `pnpm test` (which runs `scripts/test.sh`: cargo build-sbf → validator-up → jest → validator-down)
+  - If you add `[features]` to `Cargo.toml`, update `scripts/build.sh` and `scripts/test.sh` to pass them.
 - **DO NOT commit `.env` files.** They contain private keys.
 - **DO NOT modify multiple instructions in one change.** One instruction per change, test, then move on.
 - **ALWAYS use checked arithmetic** (`checked_add`, `checked_sub`, `checked_mul`, `checked_div`) for all on-chain math.
+- **ALWAYS call the explicit safety helpers** (`safety::verify_signer`, `verify_owner_program`, `verify_pda_with_bump`, `verify_token_mint`, `verify_address`, `close_account`, …). Pinocchio has no `#[derive(Accounts)]` — every guarantee Anchor used to enforce must be written out by hand at the top of each instruction.
 - **ALWAYS update this file** when changing architecture, PDA seeds, error codes, or test structure.
 
 ## Architecture
@@ -146,42 +152,72 @@ Spec v1 finalized → **about to enter Week 1–2 infra setup + code scaffolding
 
 ```
 programs/protocol/src/
-├── lib.rs             # Entry points (delegates to instruction handlers)
-├── constants.rs       # PDA seeds, protocol parameters
-├── error.rs           # All error codes
-├── instructions/      # One file per instruction
-│   └── mod.rs         # pub mod + pub use
-├── state/             # Account structures
+├── lib.rs             # entrypoint + 1-byte-tag dispatch table
+├── constants.rs       # PDA seeds, well-known program ids, protocol parameters
+├── error.rs           # ProtocolError enum → ProgramError::Custom(u32)
+├── events.rs          # Borsh event structs + `EVT <NAME> key=value` emit helpers
+├── safety/            # Explicit checks (signer/owner/PDA/discriminator/token-mint/…)
 │   └── mod.rs
-└── math/              # Business logic
-    ├── mod.rs
-    └── wad.rs         # Fixed-point WAD arithmetic (10^18)
+├── instructions/      # One file per instruction; each defines `process(...)`
+│   └── mod.rs
+├── state/             # Borsh-encoded account structs + 8-byte discriminator + load/store
+│   └── mod.rs
+└── math/              # Pure logic (no Pinocchio types beyond Result aliases)
+    ├── curve.rs       # Linear-bps quote curve evaluate
+    ├── signature.rs   # Manual Instructions-sysvar parser for ed25519 cross-check
+    ├── wad.rs         # 10^18 fixed-point (unused in v0, kept for future work)
+    └── mod.rs
 ```
 
-### Instruction Handler Pattern (3-Phase)
+### Instruction Handler Pattern (Pinocchio era)
 
-Every instruction handler follows this pattern:
+Each `instructions/X.rs` exposes:
 
 ```rust
-pub fn process_my_instruction(ctx: Context<MyInstruction>, args...) -> Result<()> {
-    // Phase 1: Validation & Calculation (immutable borrow scope)
-    let result = {
-        let state = &ctx.accounts.my_state;
-        require!(condition, ErrorCode::SomeError);
-        // All reads and math here
-        calculated_value
-    }; // borrow ends here
+pub fn process(
+    _program_id: &Address,
+    accounts: &mut [AccountView],
+    ix_data: &[u8],
+) -> ProgramResult {
+    // 1. Parse args (Borsh).
+    let args = MyArgs::try_from_slice(ix_data)
+        .map_err(|_| ProtocolError::InvalidInstructionData)?;
 
-    // Phase 2: CPIs (token transfers, mints, burns)
-    let signer_seeds = &[&[b"seed", key.as_ref(), &[bump]][..]];
-    token::transfer(cpi_ctx.with_signer(signer_seeds), amount)?;
+    // 2. Destructure the account slice. `let [...] = accounts else { ... }`
+    //    binds each element as `&mut AccountView`, which is what `set_lamports` /
+    //    `try_borrow_mut` / `assign` need.
+    let [admin_info, pool_info, _rest @ ..] = accounts else {
+        return Err(ProtocolError::NotEnoughAccountKeys.into());
+    };
 
-    // Phase 3: State update (mutable borrow)
-    let state = &mut ctx.accounts.my_state;
-    state.value = result;
+    // 3. Spell out every Anchor guarantee explicitly via the safety helpers.
+    verify_signer(admin_info)?;
+    verify_writable(pool_info)?;
+    verify_owner_program(pool_info, &PROGRAM_ID)?;
+    // For PDA-derived accounts:
+    // verify_pda_with_bump(pool_info, &[POOL_SEED, ...], pool.bump, &PROGRAM_ID)?;
+
+    // 4. Load state (Borsh decode against the 8-byte discriminator).
+    let mut pool = PoolState::from_account_view(pool_info)?;
+
+    // 5. Validate business invariants. `require!` macro from Anchor is gone —
+    //    use plain `if … { return Err(…) }`.
+    if &pool.admin != admin_info.address() {
+        return Err(ProtocolError::UnauthorizedAdmin.into());
+    }
+
+    // 6. Apply mutations and CPIs (pinocchio_system / pinocchio_token).
+    pool.value = args.value;
+    pool.store_account_view(pool_info)?;
+
+    // 7. Emit observability log (events.rs).
+    emit_pool_paused_changed(&PoolPausedChanged { … });
+
     Ok(())
 }
 ```
+
+The dispatcher in `lib.rs` matches the first byte of `instruction_data` (`InstructionTag::*` enum) and routes to the right `process(...)`. The SDK's `program.methods.X(args).rpc()` shim Borsh-encodes the args and prepends the right tag.
 
 ### Solana Account Model (Key Concept)
 
@@ -201,10 +237,12 @@ When defining instructions, explicitly specify which accounts are read vs writte
 | `base_vault`         | `[b"vault", pool_state, base_mint]`                            | `PoolState.base_vault_bump`       | Pool's base-token vault                                                                            |
 | `quote_vault`        | `[b"vault", pool_state, quote_mint]`                           | `PoolState.quote_vault_bump`      | Pool's quote-token vault                                                                           |
 | `quote_nonce_marker` | `[b"quote_used", pool_state, nonce_le_bytes]`                  | `QuoteNonceMarker.bump`           | Blocks RFQ quote replay (one-shot marker, closeable after expiry)                                  |
+| `admin_proposal`     | `[b"admin_proposal", pool_state]`                              | `AdminRotationProposal.bump`      | One-shot record for the 2-step admin rotation (propose → accept)                                   |
 
 Invariants:
 - `base_mint < quote_mint` (lexicographic ordering enforced) → prevents duplicate pools.
-- `quote_nonce_marker` is `init`-forced only in the RFQ path of `execute_swap` → replay blocked. Reclaimable via `close_expired_nonce` once `expiry_slot + SAFETY_BUFFER_SLOTS < now`.
+- `quote_nonce_marker` is manually `create_account`-forced only in the RFQ path of `execute_swap` (the `system_program::create_account` CPI fails if the marker exists) → replay blocked. Reclaimable via `close_expired_nonce` once `expiry_slot + SAFETY_BUFFER_SLOTS < now`.
+- `admin_proposal` is created by `propose_admin` and closed (rent reclaimed) by `accept_admin` or `cancel_admin_proposal`. Only one outstanding proposal per pool at a time.
 
 ## Important Implementation Notes
 
@@ -261,7 +299,7 @@ let lamports = from_wad_ceil(wad_value)?;     // WAD → u64 (round up)
 ### Compute Unit (CU) Budget
 
 - Default: 200,000 CU per instruction
-- Check after implementing: `grep "consumed" .anchor/program-logs/*.log`
+- Check after implementing: `grep "consumed" .anchor/validator.log`
 - If over budget: split into multiple instructions or optimize math
 
 ## Testing
@@ -302,10 +340,11 @@ canonical knob for deterministic logging and `--testNamePattern` filtering.
 
 Categories:
 - `60xx` — math (overflow / underflow / div0)
-- `61xx` — input validation (mint pair, TTL, fair_value, spread, size)
+- `61xx` — input validation (mint pair, TTL, fair_value, spread, size, oracle signer key, new admin, proposal stale)
 - `62xx` — authorization & state (oracle/admin signer, nonce monotonic, paused)
-- `63xx` — pricing source (curve stale + no quote, quote invalid)
+- `63xx` — pricing source (curve stale + no quote, quote invalid, replay-used)
 - `64xx` — execution (slippage, insufficient reserves)
+- `65xx` — account / nonce lifecycle / safety helpers (wrong PDA / owner / discriminator / token mint / signer flag / writable / size / address / unknown ix / invalid ix data / not enough keys)
 
 ## Security Checklist
 
@@ -323,21 +362,28 @@ Categories:
 - ⚠️ MEV (Miner Extractable Value) exposure
 - ⚠️ Business logic correctness (does the math make economic sense?)
 
-### Anchor Feature Flags (Cargo.toml)
+### Pinocchio safety checklist (replaces Anchor's `#[derive(Accounts)]`)
 
-**`init-if-needed` (Currently enabled)**
-- ⚠️ **NOT automatically dangerous** — only risky if misused in code
-- Safe usage: One-time account initialization (config, registry)
-- Unsafe usage: User-specific accounts (wallets, positions) → re-initialization attacks
-- Rule: Use `#[account(init)]` for user accounts, reserve `init_if_needed` for global singletons
+Anchor used to auto-generate signer/owner/PDA/discriminator/has_one checks from the
+`#[derive(Accounts)]` macro. Pinocchio has nothing of the kind. The
+`programs/protocol/src/safety/mod.rs` module exposes one helper per check —
+**every instruction handler must call the relevant subset explicitly**:
 
-**Why it's in workspace dependencies:**
-```toml
-[workspace.dependencies]
-anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
-```
-- Available for use, but NOT active until `#[account(init_if_needed)]` is explicitly added
-- AI should flag any `init_if_needed` usage in instruction code for human review
+| Anchor constraint          | Pinocchio equivalent                                                |
+|----------------------------|---------------------------------------------------------------------|
+| `Signer<'info>`            | `safety::verify_signer(info)`                                       |
+| `#[account(mut)]`          | `safety::verify_writable(info)` + use `&mut AccountView` for writes |
+| `#[account(owner = X)]`    | `safety::verify_owner_program(info, &X)`                            |
+| `#[account(address = X)]`  | `safety::verify_address(info, &X)`                                  |
+| `#[account(seeds=…, bump)]`| `safety::verify_pda_with_bump(info, &[seeds], bump, &PROGRAM_ID)`   |
+| 8-byte discriminator       | `PoolState::from_account_view(info)` (decode rejects mismatched tag)|
+| `token::mint = X`          | `safety::verify_token_mint(info, &X)`                               |
+| `token::authority = X`     | `safety::verify_token_authority(info, &X)`                          |
+| `#[account(close = dest)]` | `safety::close_account(account, destination)`                       |
+
+Missing any of these is silently exploitable — no compile error, no runtime panic.
+Code reviewers should grep new handlers for every account they consume and confirm
+each has the matching safety call.
 
 ### Known False Positives
 These are intentional for a boilerplate/development setup:
@@ -352,15 +398,17 @@ Before deploying to devnet/mainnet, verify:
 
 ### 1. Program ID (CRITICAL)
 ```bash
-# Current state (placeholder):
-declare_id!("11111111111111111111111111111111");
+# Current state (committed):
+solana_address::declare_id!("3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy");
 
-# Steps to fix:
-anchor build                                    # Generate keypair
+# If rotating to a new keypair:
+cargo build-sbf                                  # Generates target/deploy/protocol-keypair.json
 solana address -k target/deploy/protocol-keypair.json
-# Copy address to lib.rs declare_id!()
-# OR use vanity address:
-solana-keygen grind --starts-with ABC:1        # Custom prefix
+# Copy the new address into BOTH:
+#   programs/protocol/src/lib.rs   (declare_id!)
+#   programs/protocol/src/constants.rs (PROGRAM_ID)
+# OR use a vanity address:
+solana-keygen grind --starts-with ABC:1
 ```
 
 ### 2. Dependency Locking
@@ -373,15 +421,13 @@ cd sdk && pnpm install
 
 ### 3. Build Configuration
 ```bash
-# Verify Anchor.toml [programs.localnet] has correct program ID
-anchor build --verifiable                       # Mainnet builds
-./scripts/build.sh mainnet                      # Our custom build script
+./scripts/build.sh mainnet                      # cargo build-sbf, prints program size + rent estimate
+./scripts/build.sh devnet                       # same with `--features devnet`
 ```
 
 ### 4. Security Audit
-- [ ] No `init_if_needed` on user-specific accounts
+- [ ] Every handler calls the appropriate `safety::verify_*` helpers (see "Pinocchio safety checklist" above)
 - [ ] All math uses `checked_*` operations
-- [ ] All Signer constraints in place
 - [ ] No hardcoded private keys in code
 - [ ] `.env` files in `.gitignore`
 - [ ] Error messages don't leak sensitive info
@@ -409,7 +455,8 @@ NEXT_PUBLIC_PROGRAM_ID=<your-deployed-program-id>
 ```
 [1] What: Implement the deposit instruction
 [2] Where: programs/protocol/src/instructions/deposit.rs
-[3] How: Follow the 3-phase pattern in initialize.rs
+[3] How: Follow the Pinocchio handler pattern in set_paused.rs (slice destructure +
+        safety::verify_* + state::load → mutate → store + emit)
 [4] Constraints: Use checked_* math, ceil rounding for fees, CU < 200k
 [5] Verification: Write deposit.test.ts, seed range 200-299
 ```
@@ -425,15 +472,32 @@ Step 4: Optimize CU if needed
 
 ### Adding a New Instruction (Checklist)
 
-1. Define the instruction in `docs/SPECIFICATION.md`
-2. Create `instructions/my_instruction.rs` (3-phase pattern)
-3. Add accounts struct with Anchor validation attributes
-4. Add to `instructions/mod.rs` (pub mod + pub use)
-5. Add entry point to `lib.rs`
-6. Add error codes to `error.rs`
-7. Update this file: Architecture, PDA Seeds, Error Codes
-8. Write tests with assigned seed range
-9. Create SDK instruction builder in `sdk/src/instructions/`
+1. Define the instruction in `docs/SPECIFICATION.md`.
+2. Reserve a new tag in `InstructionTag` (lib.rs) + add the human-readable
+   name to `IX_LOG_LINES` (used by `scripts/measure-cu.sh` and debug logs).
+   Never reuse a retired tag number.
+3. Create `instructions/my_instruction.rs`:
+   - `#[derive(BorshDeserialize)] pub struct MyArgs { … }`
+   - `pub fn process(program_id, accounts: &mut [AccountView], ix_data) -> ProgramResult`
+   - Slice-destructure accounts → call the relevant `safety::verify_*` helpers → load
+     state via `from_account_view` → validate invariants → mutate / CPI → `store_account_view`
+     → emit event.
+4. Add the new module to `instructions/mod.rs` and a dispatch arm in `lib.rs`.
+5. Add any new error variants to `error.rs` (preserve the numeric mapping)
+   AND mirror them in `sdk/src/errors.ts` (`ERROR_CODE_NAMES` + `ERROR_CODE_MESSAGES`).
+6. Mirror the args struct in `sdk/src/borsh.ts` (`encodeMyInstruction`) and add a
+   builder to `sdk/src/program.ts` `Program.methods.myInstruction(…)`.
+7. Update this file: Architecture, PDA Seeds, Error Codes.
+8. Write tests with the assigned seed range. For each handler, include:
+   - **Happy path** with an event-emission assertion.
+   - **Negative paths**: one test per `safety::verify_*` you invoked
+     (`tests/security.test.ts` shows the substitution pattern — wrong owner,
+     wrong PDA, wrong address, wrong token mint, wrong authority,
+     discriminator confusion). Missing one of these is how Pinocchio bugs
+     ship to production.
+   - **Input validation**: one test per `ProtocolError` variant that the
+     handler can return from parameter checks.
+9. Re-baseline CU with `pnpm cu:measure` and re-commit `docs/PERFORMANCE.md`.
 
 ### Session Handoff
 

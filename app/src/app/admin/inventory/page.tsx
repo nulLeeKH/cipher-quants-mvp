@@ -8,14 +8,14 @@ import {
   getAssociatedTokenAddressSync,
   createAssociatedTokenAccountIdempotentInstruction,
 } from "@solana/spl-token";
-import { BN } from "@coral-xyz/anchor";
+import { BN } from "@cipher-quants/sdk";
 import { ArrowDownToLine, ArrowUpFromLine, Loader2 } from "lucide-react";
 
 import {
   deriveVault,
   createAdminWithdrawInventoryIx,
   friendlyError,
-} from "@solana-boilerplate/sdk";
+} from "@cipher-quants/sdk";
 
 import { AdminGuard } from "@/components/admin/AdminGuard";
 import { AdminNav } from "@/components/admin/AdminNav";

@@ -1,114 +1,102 @@
-use anchor_lang::prelude::*;
+use pinocchio::error::ProgramError;
 
 // ============================================================================
 // Error Codes
 // ============================================================================
 // Keep in sync with docs/SPECIFICATION.md §4 and CLAUDE.md "Error Codes".
 //
-// Categories:
+// Categories (each spaced by 100 for grep-friendliness):
 //   60xx — math (overflow / underflow / div0)
 //   61xx — input validation (mint pair, TTL, fair_value, spread, size)
 //   62xx — authorization & state (oracle/admin signer, nonce monotonic, paused)
 //   63xx — pricing source (curve stale + no quote, quote invalid)
 //   64xx — execution (slippage, insufficient reserves)
-//   65xx — account / nonce lifecycle
+//   65xx — account / nonce lifecycle / safety helpers
+//
+// `ProgramError::Custom(code)` carries the u32 to the client. The numeric
+// codes match the prior Anchor-era values 1:1 so existing SDK error mapping
+// and runbooks keep working.
 // ============================================================================
 
-#[error_code]
-pub enum ErrorCode {
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolError {
     // ----- 60xx math -----
-    #[msg("Arithmetic overflow occurred.")]
-    MathOverflow, // 6000
-
-    #[msg("Math error occurred (division by zero or invalid operation).")]
-    MathError, // 6001
-
-    #[msg("Arithmetic underflow occurred.")]
-    MathUnderflow, // 6002
+    MathOverflow = 6000,
+    MathError = 6001,
+    MathUnderflow = 6002,
 
     // ----- 61xx input validation -----
-    #[msg("base_mint and quote_mint must be different.")]
     InvalidMintPair = 6100,
-
-    #[msg("Mints must be lexicographically sorted (base_mint < quote_mint).")]
-    MintsNotSorted,
-
-    #[msg("TTL out of allowed range.")]
-    InvalidTtl,
-
-    #[msg("fair_value must be greater than zero.")]
-    InvalidFairValue,
-
-    #[msg("spread_bps exceeds MAX_SPREAD_BPS.")]
-    InvalidSpread,
-
-    #[msg("input_amount must be greater than zero.")]
-    InvalidSize,
-
-    #[msg("DepthParams out of allowed range.")]
-    InvalidDepthParams,
-
-    #[msg("SkewParams out of allowed range.")]
-    InvalidSkewParams,
-
-    #[msg("authorized_oracle_signer must not be the default Pubkey.")]
-    InvalidOracleSignerKey,
-
-    #[msg("new_admin must not be zero or equal to the current admin.")]
-    InvalidNewAdmin,
-
-    #[msg("Admin-rotation proposal is stale: pool admin changed since it was created.")]
-    ProposalStale,
+    MintsNotSorted = 6101,
+    InvalidTtl = 6102,
+    InvalidFairValue = 6103,
+    InvalidSpread = 6104,
+    InvalidSize = 6105,
+    InvalidDepthParams = 6106,
+    InvalidSkewParams = 6107,
+    InvalidOracleSignerKey = 6108,
+    InvalidNewAdmin = 6109,
+    ProposalStale = 6110,
 
     // ----- 62xx authorization & state -----
-    #[msg("Unauthorized oracle signer.")]
     UnauthorizedOracle = 6200,
-
-    #[msg("Unauthorized admin.")]
-    UnauthorizedAdmin,
-
-    #[msg("Oracle nonce must be strictly monotonic.")]
-    NonceNotMonotonic,
-
-    #[msg("Pool is paused.")]
-    PoolPaused,
+    UnauthorizedAdmin = 6201,
+    NonceNotMonotonic = 6202,
+    PoolPaused = 6203,
 
     // ----- 63xx pricing source -----
-    #[msg("Curve is stale and no signed quote provided.")]
     NoFreshPriceSource = 6300,
-
-    #[msg("Signed quote is expired.")]
-    QuoteExpired,
-
-    #[msg("Signed quote pool does not match.")]
-    QuoteWrongPool,
-
-    #[msg("Signed quote user does not match transaction signer.")]
-    QuoteWrongUser,
-
-    #[msg("Signed quote direction does not match instruction direction.")]
-    QuoteDirectionMismatch,
-
-    #[msg("Signed quote input_amount does not match instruction input_amount.")]
-    QuoteSizeMismatch,
-
-    #[msg("Signed quote ed25519 signature verification failed.")]
-    QuoteSignatureInvalid,
-
-    #[msg("Quote nonce already consumed (replay rejected).")]
-    QuoteAlreadyUsed,
+    QuoteExpired = 6301,
+    QuoteWrongPool = 6302,
+    QuoteWrongUser = 6303,
+    QuoteDirectionMismatch = 6304,
+    QuoteSizeMismatch = 6305,
+    QuoteSignatureInvalid = 6306,
+    QuoteAlreadyUsed = 6307,
 
     // ----- 64xx execution -----
-    #[msg("Output amount below min_output (slippage exceeded).")]
     SlippageExceeded = 6400,
+    InsufficientReserves = 6401,
 
-    #[msg("Vault has insufficient balance.")]
-    InsufficientReserves,
-
-    // ----- 65xx account / nonce lifecycle -----
-    #[msg("Account.pool field does not match expected pool_state.")]
+    // ----- 65xx account / nonce lifecycle / safety helpers -----
     WrongPool = 6500,
-
-    #[msg("Nonce marker not yet eligible for close (expiry + safety buffer not reached).")]
-    NonceNotYetClosable,
+    NonceNotYetClosable = 6501,
+    /// Account does not carry the expected discriminator tag (zero-copy decode).
+    WrongDiscriminator = 6502,
+    /// Account owner does not match the expected program / token program.
+    WrongAccountOwner = 6503,
+    /// Account is not the expected program-derived address.
+    WrongPda = 6504,
+    /// Required signer flag is not set on the account.
+    MissingSigner = 6505,
+    /// Required `is_writable` flag is not set on the account.
+    NotWritable = 6506,
+    /// Token account mint does not match the expected mint.
+    WrongTokenMint = 6507,
+    /// Account data length does not match the expected size.
+    WrongAccountSize = 6508,
+    /// Account address does not match the expected pubkey — equivalent to
+    /// Anchor's `#[account(address = X)]` constraint.
+    WrongAccountAddress = 6509,
+    /// Wired instruction tag is unknown to the dispatcher.
+    UnknownInstruction = 6510,
+    /// Borsh deserialize of instruction args failed.
+    InvalidInstructionData = 6511,
+    /// Required account was not provided in the accounts slice.
+    NotEnoughAccountKeys = 6512,
+    /// An instruction handler hasn't been ported to Pinocchio yet.
+    /// Temporary code while the migration is in flight — remove once every
+    /// dispatcher arm is wired to a real handler.
+    NotYetImplemented = 6599,
 }
+
+impl From<ProtocolError> for ProgramError {
+    fn from(e: ProtocolError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
+}
+
+/// `Result<T, ProgramError>` alias used throughout the crate. Mirrors the
+/// shape of Anchor's `Result<T>` so call sites stay readable after porting.
+pub type Result<T> = core::result::Result<T, ProgramError>;

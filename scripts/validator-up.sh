@@ -9,12 +9,16 @@
 #   ./scripts/validator-up.sh --foreground    # start blocking (Ctrl-C to stop)
 #
 # Logs:
-#   .anchor/validator.log            (validator stdout/stderr)
-#   .anchor/program-logs/*.log       (per-program logs; emitted on tx)
+#   .anchor/validator.log            (validator stdout/stderr — banner,
+#                                     slot tick lines)
+#   .anchor/test-ledger/validator-<ts>.log
+#                                    (validator internal metrics; not parsed)
+#   .anchor/program-cu.log           (only when `measure-cu.sh` is running —
+#                                     it subscribes via `solana logs`)
 #
 # After it's up:
 #   solana config set --url http://127.0.0.1:8899
-#   pnpm test                        # or: anchor test --skip-local-validator
+#   pnpm test
 #   ./scripts/validator-down.sh
 # ============================================================================
 set -euo pipefail
@@ -33,8 +37,8 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 # Build first if the program binary isn't present
 if [[ ! -f "$PROGRAM_SO" ]]; then
-  echo "==> $PROGRAM_SO missing — running anchor build..."
-  anchor build
+  echo "==> $PROGRAM_SO missing — running cargo build-sbf..."
+  (cd programs/protocol && cargo build-sbf)
 fi
 
 # Verify the on-disk keypair matches declare_id!
@@ -70,6 +74,12 @@ VALIDATOR_ARGS=(
   --bind-address 127.0.0.1
   --bpf-program "$PROGRAM_ID" "$PROGRAM_SO"
 )
+# NOTE: `solana-test-validator` does not write per-program logs to disk —
+# transaction "Program log:" + "consumed N of M compute units" lines only
+# appear in JSON-RPC `getTransaction` responses, or over the logsSubscribe
+# WebSocket. `scripts/measure-cu.sh` subscribes via `solana logs <PROGRAM_ID>`
+# to capture them while tests run. `--quiet` here is fine — it only suppresses
+# the validator's own banner / slot ticker.
 
 FOREGROUND=false
 for arg in "$@"; do

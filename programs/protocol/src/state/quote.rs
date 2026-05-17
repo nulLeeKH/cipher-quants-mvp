@@ -1,4 +1,5 @@
-use anchor_lang::prelude::*;
+use borsh::{BorshDeserialize, BorshSerialize};
+use pinocchio::Address;
 
 use crate::state::Side;
 
@@ -8,10 +9,10 @@ use crate::state::Side;
 // A quote ed25519-signed by the RFQ webhook with the MM's oracle key.
 // docs/SPECIFICATION.md §2.3.
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct SignedQuote {
-    pub pool: Pubkey,
-    pub user: Pubkey,
+    pub pool: Address,
+    pub user: Address,
     pub direction: Side,
     pub input_amount: u64,
     pub price: u64,
@@ -31,10 +32,10 @@ pub struct SignedQuote {
 //
 // Serialized size: 32 + 32 + 1 + 8 + 8 + 8 + 8 = 97 bytes.
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct SignedQuoteMessage {
-    pub pool: Pubkey,
-    pub user: Pubkey,
+    pub pool: Address,
+    pub user: Address,
     pub direction: Side,
     pub input_amount: u64,
     pub price: u64,
@@ -59,7 +60,7 @@ impl From<&SignedQuote> for SignedQuoteMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anchor_lang::AnchorSerialize;
+    use borsh::BorshSerialize;
 
     /// Golden-bytes parity test — proves that Rust Borsh and the SDK's
     /// hand-rolled serializer produce byte-for-byte identical output. A
@@ -68,8 +69,8 @@ mod tests {
     /// RFQ signature verification to operate safely.
     #[test]
     fn signed_quote_message_golden_bytes() {
-        let pool = Pubkey::new_from_array([0x01; 32]);
-        let user = Pubkey::new_from_array([0x02; 32]);
+        let pool = Address::new_from_array([0x01; 32]);
+        let user = Address::new_from_array([0x02; 32]);
         let msg = SignedQuoteMessage {
             pool,
             user,
@@ -80,7 +81,8 @@ mod tests {
             nonce: 1,
         };
 
-        let bytes = msg.try_to_vec().expect("borsh serialize");
+        let mut bytes = Vec::<u8>::new();
+        msg.serialize(&mut bytes).expect("borsh serialize");
         assert_eq!(bytes.len(), 97, "SignedQuoteMessage size must be 97 bytes");
 
         let mut expected = Vec::<u8>::with_capacity(97);
@@ -100,8 +102,8 @@ mod tests {
 
     #[test]
     fn side_buy_discriminant_is_zero() {
-        // Drift detection — the SDK hardcodes SIDE_BUY_TAG = 0 in its constants.
-        let bytes = Side::Buy.try_to_vec().unwrap();
+        let mut bytes = Vec::<u8>::new();
+        Side::Buy.serialize(&mut bytes).unwrap();
         assert_eq!(bytes, vec![0x00]);
     }
 }

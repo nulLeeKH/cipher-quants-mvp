@@ -45,13 +45,26 @@ engine's view.
 ```bash
 # From any machine with the admin key:
 solana --url <RPC_URL> program show <PROGRAM_ID>
-# Sanity-check the program ID matches; then:
-anchor run set-paused -- --pool <POOL_PUBKEY> --paused true
+# Sanity-check the program ID matches; then build + send the set_paused ix.
+# Pinocchio has no `anchor run` analogue — call the SDK builder directly:
+node -e '
+  const { Connection, Keypair, Transaction } = require("@solana/web3.js");
+  const sdk = require("@cipher-quants/sdk");
+  (async () => {
+    const conn = new Connection(process.env.RPC_URL, "confirmed");
+    const admin = Keypair.fromSecretKey(Uint8Array.from(require(process.env.ADMIN_WALLET_PATH)));
+    const ix = await sdk.createSetPausedIx(
+      new sdk.Program(new sdk.AnchorProvider(conn, new sdk.Wallet(admin))),
+      { admin: admin.publicKey, poolState: new sdk.PublicKey(process.env.POOL), paused: true },
+    );
+    const sig = await conn.sendTransaction(new Transaction().add(ix), [admin]);
+    console.log("paused", sig);
+  })();
+'
 ```
 
-(Or build the `set_paused(true)` instruction via the SDK / `keeper` admin
-sub-command — whichever your operator script has wired. The instruction
-itself is in `programs/protocol/src/instructions/set_paused.rs`.)
+(Or wire it into the `keeper` CLI as a subcommand; the instruction itself is
+in `programs/protocol/src/instructions/set_paused.rs`.)
 
 **Verify**: fetch the pool, check `paused == true`. New `execute_swap` calls
 now reject with `PoolPaused (6203)`.

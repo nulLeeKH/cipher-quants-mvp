@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Connection, PublicKey } from "@solana/web3.js";
 
-import { parseEventsFromLogs, PROGRAM_ID } from "@solana-boilerplate/sdk";
+import { parseEventsFromLogs, PROGRAM_ID } from "@cipher-quants/sdk";
 import { verifySession } from "@/lib/auth/jwt";
 import { readSessionCookie } from "@/lib/auth/cookies";
 

@@ -1,24 +1,38 @@
 #!/usr/bin/env bash
 # ============================================================================
-# measure-cu.sh — Run the integration test suite end-to-end, then aggregate
-# per-instruction Compute-Unit (CU) usage from .anchor/program-logs/*.log
-# and write a human-readable summary to docs/PERFORMANCE.md (overwritten).
+# measure-cu.sh — Run the integration test suite, capture per-tx program logs
+# via `solana logs`, then aggregate Compute-Unit usage into docs/PERFORMANCE.md.
 #
-# Prerequisite: nothing — the script invokes `pnpm test` (which spawns its own
-# test-validator via anchor.toml). If a manual validator is already running,
-# stop it first or pass --skip-test to only re-aggregate.
+# Why a `solana logs` subscriber: `solana-test-validator` does not persist
+# transaction logs to disk by default (the per-program-log files were an
+# Anchor-CLI feature). The Pinocchio era doesn't have that, so we stream them
+# out of the validator over its JSON-RPC WebSocket.
+#
+# Flow:
+#   1. validator-up.sh (idempotent; reuses an existing validator if present)
+#   2. `solana logs <PROGRAM_ID>` in the background → .anchor/program-cu.log
+#   3. jest (pointed at the local validator)
+#   4. stop the logs subscriber
+#   5. awk over .anchor/program-cu.log → pair `Instruction: <Name>` with the
+#      next `consumed N of M compute units` → docs/PERFORMANCE.md
 #
 # Usage:
-#   ./scripts/measure-cu.sh               # full run: tests + aggregate
-#   ./scripts/measure-cu.sh --skip-test   # only aggregate existing logs
+#   ./scripts/measure-cu.sh                  # full pipeline
+#   ./scripts/measure-cu.sh --skip-test      # re-aggregate the existing log
 # ============================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-LOG_DIR=".anchor/program-logs"
+PROGRAM_ID="3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy"
+LOG_FILE=".anchor/program-cu.log"
 OUT=docs/PERFORMANCE.md
+
+# Whitelist of OUR instruction names — keeps SPL Token's
+# `Instruction: Transfer` / `Instruction: InitializeAccount3` CPI lines from
+# clobbering the most-recent-Instruction tracker mid-tx.
+OUR_IX_RE="^(InitPool|UpdateOracle|ExecuteSwap|SetPaused|RotateOracleSigner|RotateAdmin|AdminWithdrawInventory|CloseExpiredNonce|ProposeAdmin|AcceptAdmin|CancelAdminProposal)$"
 
 SKIP_TEST=false
 for arg in "$@"; do
@@ -27,32 +41,70 @@ for arg in "$@"; do
   esac
 done
 
+LOGS_PID=""
+OWN_VALIDATOR=0
+cleanup() {
+  if [[ -n "$LOGS_PID" ]] && kill -0 "$LOGS_PID" 2>/dev/null; then
+    kill "$LOGS_PID" 2>/dev/null || true
+  fi
+  if [[ "$OWN_VALIDATOR" == "1" ]]; then
+    ./scripts/validator-down.sh || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
 if ! $SKIP_TEST; then
-  echo "==> running pnpm test (validator spawned by anchor)"
-  pnpm test || {
-    code=$?
-    echo "==> WARNING: pnpm test exited $code. Aggregating whatever logs exist anyway."
+  if ! curl -fs -X POST -H 'Content-Type: application/json' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
+       http://127.0.0.1:8899 >/dev/null 2>&1; then
+    echo "==> starting validator"
+    ./scripts/validator-up.sh
+    OWN_VALIDATOR=1
+  fi
+
+  echo "==> subscribing to logs for $PROGRAM_ID"
+  mkdir -p "$(dirname "$LOG_FILE")"
+  : > "$LOG_FILE"
+  solana logs --url http://127.0.0.1:8899 "$PROGRAM_ID" >"$LOG_FILE" 2>&1 &
+  LOGS_PID=$!
+  sleep 1
+
+  echo "==> running jest"
+  export ANCHOR_PROVIDER_URL="${ANCHOR_PROVIDER_URL:-http://127.0.0.1:8899}"
+  export ANCHOR_WALLET="${ANCHOR_WALLET:-$HOME/.config/solana/id.json}"
+  pnpm exec jest --preset ts-jest --json --outputFile=test_result.json || {
+    echo "==> WARNING: jest exited non-zero; aggregating logs anyway."
   }
+
+  echo "==> stopping logs subscriber"
+  kill "$LOGS_PID" 2>/dev/null || true
+  LOGS_PID=""
 fi
 
-if [[ ! -d "$LOG_DIR" ]]; then
-  echo "ERROR: $LOG_DIR not found. Run with tests at least once first."
+if [[ ! -s "$LOG_FILE" ]]; then
+  echo "ERROR: $LOG_FILE is empty. Did the subscriber catch any traffic?"
   exit 1
 fi
 
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
-# Lines look like:
-#   Program <id> consumed 1234 of 200000 compute units
-# We pair them with the most recent "Program log: Instruction: <Name>" line.
-awk '
+awk -v our_re="$OUR_IX_RE" -v consumed_re="Program $PROGRAM_ID consumed [0-9]+ of [0-9]+ compute units" '
+  # Only our 11 instruction names update the tracker; SPL Token CPI lines
+  # like `Instruction: Transfer` / `Instruction: InitializeAccount3` are
+  # ignored.
   /Program log: Instruction:/ {
-    sub(/.*Instruction: */, "")
-    ix = $0
+    line = $0
+    sub(/.*Instruction: */, "", line)
+    if (line ~ our_re) {
+      ix = line
+    }
     next
   }
-  /consumed [0-9]+ of [0-9]+ compute units/ {
+  # Only OUR program-id consumed line pairs with the most recent
+  # `Instruction: <ours>`. Sub-CPI consumed lines (Transfer, InitializeAccount3)
+  # appear inside the same tx and would mis-attribute.
+  $0 ~ consumed_re {
     match($0, /consumed [0-9]+/)
     n = substr($0, RSTART + 9, RLENGTH - 9) + 0
     if (ix != "") {
@@ -60,23 +112,29 @@ awk '
       ix = ""
     }
   }
-' "$LOG_DIR"/*.log > "$TMP"
+' "$LOG_FILE" > "$TMP"
 
 if [[ ! -s "$TMP" ]]; then
-  echo "ERROR: no CU samples found in $LOG_DIR. Did the tests actually run?"
+  echo "ERROR: no CU samples found in $LOG_FILE."
+  echo "       Possible causes:"
+  echo "         - tests did not exercise the program (check Jest output)"
+  echo "         - solana logs subscriber failed to attach in time"
+  echo "         - program ID mismatch (expected: $PROGRAM_ID)"
   exit 1
 fi
 
-# Aggregate per instruction: min / max / mean / p95 / count
 mkdir -p "$(dirname "$OUT")"
 cat > "$OUT" <<'EOF'
 # Compute-Unit Performance
 
 > Auto-generated by `scripts/measure-cu.sh`. Re-run after meaningful changes
-> to instruction bodies. Source: `.anchor/program-logs/*.log` "consumed" lines.
+> to instruction bodies. Source: `.anchor/program-cu.log` — the output of
+> `solana logs <PROGRAM_ID>` streamed during the Jest run.
 >
 > Solana default CU budget per instruction = 200,000. Treat >100,000 as a
-> yellow flag and >150,000 as red.
+> yellow flag and >150,000 as red. Each row aggregates one
+> `Program log: Instruction: <Name>` paired with the following
+> `Program <id> consumed N of M compute units` line.
 
 EOF
 
@@ -90,7 +148,16 @@ awk -F'\t' '
   END {
     for (ix in vals) {
       n = split(vals[ix], v, " ")
-      asort(v)
+      # Insertion sort — `asort` is gawk-only; BSD awk on macOS lacks it.
+      for (i = 2; i <= n; i++) {
+        key = v[i] + 0
+        j = i - 1
+        while (j > 0 && (v[j] + 0) > key) {
+          v[j + 1] = v[j]
+          j--
+        }
+        v[j + 1] = key
+      }
       sum = 0
       for (i = 1; i <= n; i++) sum += v[i]
       mean = sum / n
@@ -106,11 +173,86 @@ awk -F'\t' '
 ' "$TMP" | sort >> "$OUT"
 
 echo "" >> "$OUT"
+echo "## vs prior Anchor estimates" >> "$OUT"
+echo "" >> "$OUT"
+echo "Reference numbers are the Anchor-era estimates from \`docs/ARCHITECTURE.md §8\`" >> "$OUT"
+echo "(pre-migration). Pinocchio reduction = (anchor_mean - pinocchio_mean) /" >> "$OUT"
+echo "anchor_mean, where anchor_mean = midpoint of the original range." >> "$OUT"
+echo "" >> "$OUT"
+echo "| Instruction | Anchor (range) | Pinocchio (mean) | Δ |" >> "$OUT"
+echo "|---|---:|---:|---:|" >> "$OUT"
+
+# Anchor estimates from ARCHITECTURE.md §8 — keep this list in sync with that table.
+awk -F'\t' -v anchor_init_pool="32500"           -v anchor_init_pool_range="30000-35000" \
+          -v anchor_update_oracle="4000"          -v anchor_update_oracle_range="2000-6000" \
+          -v anchor_execute_swap="43500"          -v anchor_execute_swap_range="32000-55000" \
+          -v anchor_set_paused="6000"             -v anchor_set_paused_range="5000-7000" \
+          -v anchor_rotate_oracle_signer="6000"   -v anchor_rotate_oracle_signer_range="5000-7000" \
+          -v anchor_rotate_admin="6000"           -v anchor_rotate_admin_range="5000-7000" \
+          -v anchor_admin_withdraw_inventory="21500" -v anchor_admin_withdraw_inventory_range="15000-28000" \
+          -v anchor_close_expired_nonce="8500"    -v anchor_close_expired_nonce_range="5000-12000" \
+          '
+  { vals[$1] = (vals[$1] == "" ? $2 : vals[$1] " " $2) }
+  END {
+    keys["InitPool"] = "init_pool"
+    keys["UpdateOracle"] = "update_oracle"
+    keys["ExecuteSwap"] = "execute_swap"
+    keys["SetPaused"] = "set_paused"
+    keys["RotateOracleSigner"] = "rotate_oracle_signer"
+    keys["RotateAdmin"] = "rotate_admin"
+    keys["AdminWithdrawInventory"] = "admin_withdraw_inventory"
+    keys["CloseExpiredNonce"] = "close_expired_nonce"
+
+    for (ix in keys) {
+      v = vals[ix]
+      if (v == "") continue
+      n = split(v, arr, " ")
+      sum = 0
+      for (i = 1; i <= n; i++) sum += arr[i]
+      mean = sum / n
+      anchor_mean_var = "anchor_" keys[ix]
+      anchor_range_var = "anchor_" keys[ix] "_range"
+      cmd = "echo $" anchor_mean_var
+      # We accessed the variable directly via awk -v above; reconstruct from arrays.
+    }
+    # Output rows in a fixed order.
+    order[1] = "InitPool"; ar[1] = anchor_init_pool; arange[1] = anchor_init_pool_range
+    order[2] = "UpdateOracle"; ar[2] = anchor_update_oracle; arange[2] = anchor_update_oracle_range
+    order[3] = "ExecuteSwap"; ar[3] = anchor_execute_swap; arange[3] = anchor_execute_swap_range
+    order[4] = "SetPaused"; ar[4] = anchor_set_paused; arange[4] = anchor_set_paused_range
+    order[5] = "RotateOracleSigner"; ar[5] = anchor_rotate_oracle_signer; arange[5] = anchor_rotate_oracle_signer_range
+    order[6] = "RotateAdmin"; ar[6] = anchor_rotate_admin; arange[6] = anchor_rotate_admin_range
+    order[7] = "AdminWithdrawInventory"; ar[7] = anchor_admin_withdraw_inventory; arange[7] = anchor_admin_withdraw_inventory_range
+    order[8] = "CloseExpiredNonce"; ar[8] = anchor_close_expired_nonce; arange[8] = anchor_close_expired_nonce_range
+
+    for (i = 1; i <= 8; i++) {
+      ix = order[i]
+      v = vals[ix]
+      if (v == "") {
+        printf "| %s | %s | (no samples) | — |\n", ix, arange[i]
+        continue
+      }
+      n = split(v, arr, " ")
+      sum = 0
+      for (j = 1; j <= n; j++) sum += arr[j]
+      mean = sum / n
+      delta = (mean - ar[i]) / ar[i] * 100.0
+      sign = delta >= 0 ? "+" : ""
+      printf "| %s | %s | %.0f | %s%.1f%% |\n", ix, arange[i], mean, sign, delta
+    }
+    print ""
+    print "_propose_admin / accept_admin / cancel_admin_proposal were added in"
+    print "the Pinocchio era (2-step rotation) — no Anchor baseline._"
+  }
+' "$TMP" >> "$OUT"
+
+echo "" >> "$OUT"
 echo "## Raw sample count" >> "$OUT"
 echo "" >> "$OUT"
-echo "    $(wc -l < "$TMP" | tr -d ' ') consumed-line samples across $(ls "$LOG_DIR"/*.log 2>/dev/null | wc -l | tr -d ' ') log files" >> "$OUT"
+echo "    $(wc -l < "$TMP" | tr -d ' ') consumed-line samples from $LOG_FILE" >> "$OUT"
 echo "" >> "$OUT"
 echo "_Generated $(date -u +%Y-%m-%dT%H:%M:%SZ)_" >> "$OUT"
 
 echo "==> wrote $OUT"
+echo ""
 cat "$OUT"

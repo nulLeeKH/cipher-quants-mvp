@@ -1,4 +1,8 @@
-use anchor_lang::prelude::*;
+use borsh::{BorshDeserialize, BorshSerialize};
+use pinocchio::{error::ProgramError, AccountView, Address};
+
+use crate::error::{ProtocolError, Result};
+use crate::state::{discriminator, tag};
 
 // ============================================================================
 // Side
@@ -6,7 +10,7 @@ use anchor_lang::prelude::*;
 // Borsh enum: 1-byte discriminant. Buy=0, Sell=1. Order is significant — it
 // defines the canonical signing format for SignedQuote (docs/SPECIFICATION.md §2.3).
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
     /// user buys base (quote → base, user pays quote)
     Buy,
@@ -20,7 +24,7 @@ pub enum Side {
 // Linear-bps depth model. depth_bps = size_base_equiv * depth_coef_bps / size_unit,
 // capped at max_depth_bps. See docs/SPECIFICATION.md §2.2.
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Default, InitSpace)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default)]
 pub struct DepthParams {
     /// Extra spread (bps) added per `size_unit` of user size.
     pub depth_coef_bps: u32,
@@ -40,7 +44,7 @@ pub struct DepthParams {
 // How far the mid is pushed in one direction based on inventory imbalance.
 // See docs/SPECIFICATION.md §2.2.
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Default, InitSpace)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Debug, Default)]
 pub struct SkewParams {
     /// Target base weight (bps of total quote-denominated value).
     /// 5000 = 50% base / 50% quote (delta-neutral).
@@ -64,20 +68,19 @@ pub struct SkewParams {
 // No separate `reserves_*` field — we always read vault.amount directly
 // (OPEN_QUESTIONS 3.12 decision).
 
-#[account]
-#[derive(InitSpace, Debug)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
 pub struct PoolState {
     // ----- Authority -----
-    pub admin: Pubkey,
-    pub authorized_oracle_signer: Pubkey,
+    pub admin: Address,
+    pub authorized_oracle_signer: Address,
 
     // ----- Pair identifiers -----
-    pub base_mint: Pubkey,
-    pub quote_mint: Pubkey,
+    pub base_mint: Address,
+    pub quote_mint: Address,
 
     // ----- Vault -----
-    pub base_vault: Pubkey,
-    pub quote_vault: Pubkey,
+    pub base_vault: Address,
+    pub quote_vault: Address,
 
     // ----- Price parameters (pushed by the oracle worker) -----
     pub fair_value: u64,
@@ -97,9 +100,61 @@ pub struct PoolState {
     pub base_vault_bump: u8,
     pub quote_vault_bump: u8,
 
-    // ----- Kill switch -----
-    pub paused: bool,
+    // ----- Kill switch (u8: 0 = false, 1 = true; Borsh-compatible with bool) -----
+    pub paused: u8,
 
     // ----- Reserved -----
     pub _reserved: [u8; 64],
+}
+
+impl PoolState {
+    pub const DISCRIMINATOR: [u8; 8] = discriminator(tag::POOL_STATE);
+
+    /// Body size after the 8-byte discriminator.
+    ///   6 * 32 (pubkeys)               = 192
+    /// + 8 (fair_value u64)
+    /// + 2 (spread_bps u16)
+    /// + 4+8+2+6 (DepthParams)          = 20
+    /// + 2+2+2+10 (SkewParams)          = 16
+    /// + 8 (last_oracle_update_slot u64)
+    /// + 8 (oracle_nonce u64)
+    /// + 5 (current_mode_ttl, bump, base_vault_bump, quote_vault_bump, paused)
+    /// + 64 (_reserved)
+    /// = 192 + 8 + 2 + 20 + 16 + 8 + 8 + 5 + 64 = 323.
+    pub const SIZE: usize = 323;
+    pub const ACCOUNT_SIZE: usize = 8 + Self::SIZE;
+
+    pub fn load(data: &[u8]) -> Result<Self> {
+        if data.len() < 8 {
+            return Err(ProtocolError::WrongAccountSize.into());
+        }
+        if data[..8] != Self::DISCRIMINATOR {
+            return Err(ProtocolError::WrongDiscriminator.into());
+        }
+        Self::try_from_slice(&data[8..]).map_err(|_| ProgramError::InvalidAccountData)
+    }
+
+    pub fn store(&self, data: &mut [u8]) -> Result<()> {
+        if data.len() < Self::ACCOUNT_SIZE {
+            return Err(ProtocolError::WrongAccountSize.into());
+        }
+        data[..8].copy_from_slice(&Self::DISCRIMINATOR);
+        let mut writer = &mut data[8..];
+        self.serialize(&mut writer)
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        Ok(())
+    }
+
+    /// Borrow the account immutably and decode. Caller drops the resulting
+    /// `Self` before any CPI that mutates the same account.
+    pub fn from_account_view(info: &AccountView) -> Result<Self> {
+        let data = info.try_borrow()?;
+        Self::load(&data)
+    }
+
+    /// Borrow mutably and write. Caller must not hold any concurrent borrow.
+    pub fn store_account_view(&self, info: &mut AccountView) -> Result<()> {
+        let mut data = info.try_borrow_mut()?;
+        self.store(&mut data)
+    }
 }

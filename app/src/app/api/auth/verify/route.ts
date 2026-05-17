@@ -1,14 +1,13 @@
 import { NextResponse } from "next/server";
 import { Connection, PublicKey, Transaction } from "@solana/web3.js";
 import nacl from "tweetnacl";
-import { AnchorProvider, Program } from "@coral-xyz/anchor";
+import { AnchorProvider, Program } from "@cipher-quants/sdk";
 
 import {
-  IDL,
   PROGRAM_ID,
   fetchPoolState,
   derivePoolState,
-} from "@solana-boilerplate/sdk";
+} from "@cipher-quants/sdk";
 
 import { verifyChallenge, issueSession } from "@/lib/auth/jwt";
 import { formatChallengeMessage } from "@/lib/auth/message";
@@ -175,8 +174,8 @@ export async function POST(req: Request) {
       const provider = new AnchorProvider(connection, readonlyWallet, {
         commitment: "confirmed",
       });
-      const program = new Program(IDL as any, provider);
-      const pool = await fetchPoolState(program as any, baseMint, quoteMint);
+      const program = new Program(provider);
+      const pool = await fetchPoolState(program, baseMint, quoteMint);
       const adminPk: PublicKey = pool.state.admin;
       if (!adminPk.equals(signerPk)) {
         return NextResponse.json(

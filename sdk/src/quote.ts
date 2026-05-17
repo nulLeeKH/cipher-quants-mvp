@@ -1,39 +1,25 @@
-import { BN, Program } from "@coral-xyz/anchor";
 import {
   Ed25519Program,
   Keypair,
   PublicKey,
   TransactionInstruction,
 } from "@solana/web3.js";
+import BN from "bn.js";
 
-import { Protocol } from "./idl/protocol.js";
 import { deriveQuoteNonceMarker } from "./accounts/index.js";
-import {
-  SIDE_BUY_TAG,
-  SIDE_SELL_TAG,
-} from "./constants/index.js";
+import { SIDE_BUY_TAG, SIDE_SELL_TAG } from "./constants/index.js";
 import {
   createExecuteSwapIx,
   ExecuteSwapParams,
   Side,
   SignedQuoteArg,
 } from "./instructions/execute_swap.js";
+import { type Program } from "./program.js";
 
 // ============================================================================
 // SignedQuote canonical serialization (97 bytes)
 // docs/SPECIFICATION.md §2.3
 // ============================================================================
-//
-// Layout (Borsh, little-endian):
-//   pool         (32 bytes Pubkey)
-//   user         (32 bytes Pubkey)
-//   direction    (1 byte: Buy=0, Sell=1)
-//   input_amount (8 bytes u64 LE)
-//   price        (8 bytes u64 LE)
-//   expiry_slot  (8 bytes u64 LE)
-//   nonce        (8 bytes u64 LE)
-//
-// Total: 32+32+1+8+8+8+8 = 97 bytes
 
 export interface SignedQuoteMessage {
   pool: PublicKey;
@@ -47,7 +33,6 @@ export interface SignedQuoteMessage {
 
 const U64_MAX = (1n << 64n) - 1n;
 
-/** Throws on values that wouldn't survive u64 round-trip via on-chain Borsh. */
 function assertU64(name: string, v: bigint): void {
   if (typeof v !== "bigint") {
     throw new Error(`${name} must be a bigint`);
@@ -60,10 +45,6 @@ function assertU64(name: string, v: bigint): void {
 export function serializeSignedQuoteMessage(
   msg: SignedQuoteMessage
 ): Uint8Array {
-  // u64 range guard — DataView.setBigUint64 throws on out-of-range values, but
-  // the message is opaque, so we translate to a clear error at the SDK entry
-  // point. The on-chain ed25519 verify accepts only the exact byte layout
-  // (no truncation), making this guard load-bearing for RFQ correctness.
   assertU64("inputAmount", msg.inputAmount);
   assertU64("price", msg.price);
   assertU64("expirySlot", msg.expirySlot);
@@ -74,7 +55,7 @@ export function serializeSignedQuoteMessage(
   buf.set(msg.user.toBuffer(), 32); // 32
   buf[64] = msg.direction === "buy" ? SIDE_BUY_TAG : SIDE_SELL_TAG;
   const view = new DataView(buf.buffer);
-  view.setBigUint64(65, msg.inputAmount, true); // little-endian
+  view.setBigUint64(65, msg.inputAmount, true);
   view.setBigUint64(73, msg.price, true);
   view.setBigUint64(81, msg.expirySlot, true);
   view.setBigUint64(89, msg.nonce, true);
@@ -85,14 +66,6 @@ export function serializeSignedQuoteMessage(
 // Build a SignedQuote + the matching Ed25519 verify instruction
 // ============================================================================
 
-/**
- * Helper used by the RFQ webhook to sign a quote with the oracle key.
- * Returns:
- *   - `signedQuote`: argument for execute_swap's signed_quote_opt
- *   - `verifyIx`:    the ed25519 verify instruction that must be prepended
- *                    directly before execute_swap
- *   - `messageBytes`: canonical serialized bytes (debug aid)
- */
 export function buildSignedQuoteWithVerifyIx(
   oracleSigner: Keypair,
   msg: SignedQuoteMessage
@@ -103,15 +76,12 @@ export function buildSignedQuoteWithVerifyIx(
 } {
   const messageBytes = serializeSignedQuoteMessage(msg);
 
-  // Ed25519Program.createInstructionWithPrivateKey internally signs + builds the verify ix.
   const verifyIx = Ed25519Program.createInstructionWithPrivateKey({
     privateKey: oracleSigner.secretKey,
     message: messageBytes,
   });
 
   // verify ix data layout: [header(16) ... payload(pubkey+sig+msg)].
-  // signature_offset is at bytes [2..4) as a u16 LE; extract the 64-byte signature.
-  // Handles both Buffer and Uint8Array via DataView so we stay cross-runtime safe.
   const dataU8: Uint8Array =
     verifyIx.data instanceof Uint8Array
       ? verifyIx.data
@@ -123,9 +93,7 @@ export function buildSignedQuoteWithVerifyIx(
   ).getUint16(2, true);
   const signature = dataU8.subarray(sigOffset, sigOffset + 64);
   if (signature.length !== 64) {
-    throw new Error(
-      `expected 64-byte signature, got ${signature.length}`
-    );
+    throw new Error(`expected 64-byte signature, got ${signature.length}`);
   }
 
   const signedQuote: SignedQuoteArg = {
@@ -148,9 +116,7 @@ export function buildSignedQuoteWithVerifyIx(
 
 export interface ExecuteSwapWithVerifyParams
   extends Omit<ExecuteSwapParams, "signedQuote" | "quoteNonceMarker"> {
-  /** Pre-built signed quote (from buildSignedQuoteWithVerifyIx) */
   signedQuote: SignedQuoteArg;
-  /** Matching ed25519 verify ix (from buildSignedQuoteWithVerifyIx) */
   verifyIx: TransactionInstruction;
 }
 
@@ -161,7 +127,7 @@ export interface ExecuteSwapWithVerifyParams
  * Returns: [verifyIx, swapIx] — add to the transaction in this order.
  */
 export async function executeSwapWithVerify(
-  program: Program<Protocol>,
+  program: Program,
   params: ExecuteSwapWithVerifyParams
 ): Promise<[TransactionInstruction, TransactionInstruction]> {
   const noncebi = BigInt(params.signedQuote.nonce.toString());

@@ -1,21 +1,18 @@
 // ============================================================================
-// Anchor re-export shim
+// Anchor-shim re-exports
 // ============================================================================
-// Deno's `npm:@coral-xyz/anchor` ESM named-export resolution is fragile, so
-// we explicitly load via createRequire (CommonJS) and re-export named members.
-// Every keeper file imports from "./anchor.ts".
+// Pre-migration this loaded `@coral-xyz/anchor` directly. The Pinocchio-era
+// SDK ships its own Anchor-shaped Program / AnchorProvider / Wallet on top of
+// the 1-byte-tag + Borsh dispatch, so we just forward those names here. Every
+// keeper file already imports from "./anchor.ts" — no call-site churn needed.
 
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 // deno-lint-ignore no-explicit-any
-const anchor: any = require("@coral-xyz/anchor");
+const sdk: any = require("../../sdk/dist/index.js");
 
-export const BN = anchor.BN;
-export const AnchorProvider = anchor.AnchorProvider;
-export const Wallet = anchor.Wallet;
-export const Program = anchor.Program;
-export type Idl = ReturnType<typeof anchor.Idl>;
-
-// Re-export type-only via runtime any → consumers declare proper types
-// at usage sites if needed.
+export const BN = sdk.BN;
+export const AnchorProvider = sdk.AnchorProvider;
+export const Wallet = sdk.Wallet;
+export const Program = sdk.Program;

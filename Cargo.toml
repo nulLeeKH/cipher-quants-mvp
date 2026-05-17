@@ -15,5 +15,28 @@ incremental = false
 codegen-units = 1
 
 [workspace.dependencies]
-anchor-lang = { version = "0.32.1", features = ["init-if-needed"] }
-anchor-spl = { version = "0.32.1" }
+# Pinocchio core. 0.11.x is the line the companion crates (pinocchio-system
+# 0.6, pinocchio-token 0.6, pinocchio-log 0.5) are built against. Companions
+# use the AccountView / Address types, not the legacy AccountInfo / Pubkey.
+pinocchio = { version = "0.11", default-features = false, features = ["alloc", "cpi", "copy"] }
+pinocchio-system = "0.6"
+pinocchio-token = "0.6"
+pinocchio-log = "0.5"
+
+# Address-from-base58 const helper (`Address::from_str_const`, `address!`) +
+# Borsh derives + `Copy`. Pinocchio re-exports `Address` from `solana-address`,
+# but doesn't enable `decode` / `borsh`, so we depend on it directly.
+# Cargo feature unification makes the upgrades apply transitively.
+# `sha2` exposes `Address::derive_address` (cheap PDA verify with known bump).
+# `curve25519` exposes `Address::find_program_address` on the host target so
+# `cargo check` works; the on-chain build (target_os = "solana") doesn't need
+# it since the syscall variant is gated on the target.
+solana-address = { version = "2.6", default-features = false, features = ["decode", "borsh", "copy", "sha2", "curve25519"] }
+
+# Wire-format / on-disk serialization. The RFQ SignedQuoteMessage payload
+# is byte-identical between this crate and the SDK — both must use the
+# same Borsh dialect.
+borsh = { version = "1.5", default-features = false, features = ["derive"] }
+
+# IDL annotations (consumed by `shank idl` to emit JSON for the SDK).
+shank = "0.4"

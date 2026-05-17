@@ -90,15 +90,15 @@ function renderMetrics(m: Metrics): string {
   return lines.join("\n");
 }
 
-// Load Anchor + SDK via CommonJS require to bypass Deno's strict ESM resolution.
+// Load SDK via CommonJS require to bypass Deno's strict ESM resolution.
+// The SDK now ships its own AnchorProvider / Wallet shim built on the
+// Pinocchio dispatch — no @coral-xyz/anchor runtime dep anymore.
 const require = createRequire(import.meta.url);
-// deno-lint-ignore no-explicit-any
-const anchor: any = require("@coral-xyz/anchor");
-const { AnchorProvider, Wallet } = anchor;
 // deno-lint-ignore no-explicit-any
 const sdk: any = require("../../sdk/dist/index.js");
 // deno-lint-ignore no-explicit-any
 const sdkAccounts: any = require("../../sdk/dist/accounts/index.js");
+const { AnchorProvider, Wallet } = sdk;
 
 // ============================================================================
 // Request / Response schemas (JupiterZ-compatible simple v0)

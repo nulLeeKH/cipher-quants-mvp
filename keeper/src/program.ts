@@ -2,24 +2,20 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { createRequire } from "node:module";
 
 import { AnchorProvider, Wallet } from "./anchor.ts";
-import type { Protocol } from "@cipher-quants/sdk";
+import type { RpcAdapter } from "./connection.ts";
 
 const require = createRequire(import.meta.url);
 // The SDK ships as CommonJS. We use createRequire to bypass Deno's strict
 // file-path ESM resolution.
-const sdk = require("../../sdk/dist/index.js") as {
-  createProgram: (provider: typeof AnchorProvider.prototype) => any;
-  PROGRAM_ID: PublicKey;
-};
+// deno-lint-ignore no-explicit-any
+const sdk: any = require("../../sdk/dist/index.js");
 const { createProgram: sdkCreateProgram, PROGRAM_ID } = sdk;
 
-import type { RpcAdapter } from "./connection.ts";
-
 // ============================================================================
-// Anchor Provider + Program builder
+// Program builder
 // ============================================================================
-// The SDK constructs a typed Program<Protocol>. The keeper uses that Program
-// for every instruction (oracle update, RFQ webhook swap tx, admin ops, ...).
+// The SDK constructs a typed Program instance from a Pinocchio-era dispatcher
+// shim. The keeper uses it for every instruction (oracle push, admin ops, ...).
 
 // deno-lint-ignore no-explicit-any
 export interface KeeperProgram {

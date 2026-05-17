@@ -51,7 +51,7 @@ instruction automatically.
 ### 2.1 `PoolState`
 
 ```rust
-#[account]
+// Borsh-encoded account, 8-byte tag discriminator at offset 0
 pub struct PoolState {
     // Authority
     pub admin: Pubkey,                       // Pool admin (init/pause/rotate)
@@ -105,7 +105,7 @@ MM hedges/rebalances externally), not "real liquidity". u128 integer-ratio is
 used throughout (details in [../CLAUDE.md "On-Chain Math"](../CLAUDE.md)).
 
 ```rust
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Default)]
 pub struct DepthParams {
     /// Extra spread (bps) added per `size_unit` of user size.
     /// Example: size_unit=1_000_000 (= 1.0 base), depth_coef_bps=2 → +2 bps slippage per base.
@@ -120,7 +120,7 @@ pub struct DepthParams {
     pub _reserved: [u8; 6],
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, Default)]
 pub struct SkewParams {
     /// Target base weight (bps of total quote-denominated value).
     /// 5000 = 50% base / 50% quote (delta-neutral).
@@ -216,7 +216,7 @@ preserves this property.
 ### 2.3 `SignedQuote` (instruction argument; not an account)
 
 ```rust
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Clone)]
 pub struct SignedQuote {
     pub pool: Pubkey,            // PoolState address (prevents rebinding)
     pub user: Pubkey,            // The user this quote was issued for
@@ -230,7 +230,7 @@ pub struct SignedQuote {
     pub signature: [u8; 64],     // ed25519 signature over the canonical bytes (signature excluded)
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Buy,    // user buys base (quote → base, user pays quote)
     Sell,   // user sells base (base → quote, user pays base)
@@ -259,7 +259,7 @@ pub struct SignedQuoteMessage {
 
 | Item                  | Value                                                                                                                                                                                                                       |
 |---|---|
-| Serialization         | **Borsh** (Anchor default). Field order follows the struct declaration.                                                                                                                                                       |
+| Serialization         | **Borsh** (`borsh` 1.5, no length prefix on fixed arrays). Field order follows the struct declaration.                                                                                                                       |
 | Side enum encoding    | Borsh enum: 1 byte (Buy=0, Sell=1).                                                                                                                                                                                          |
 | Signature algorithm   | **Ed25519**.                                                                                                                                                                                                                  |
 | Signer key            | The ed25519 private key matching `pool_state.authorized_oracle_signer`.                                                                                                                                                       |
@@ -272,7 +272,7 @@ pub struct SignedQuoteMessage {
 ### 2.4 `QuoteNonceMarker` (replay-guard PDA account)
 
 ```rust
-#[account]
+// Borsh-encoded account, 8-byte tag discriminator at offset 0
 pub struct QuoteNonceMarker {
     pub pool: Pubkey,         // Which pool this nonce belongs to.
     pub nonce: u64,           // The nonce value this marker represents.
@@ -334,10 +334,10 @@ pub struct QuoteNonceMarker {
 - `initial_fair_value > 0` → `InvalidFairValue`
 - `initial_spread_bps <= MAX_SPREAD_BPS` → `InvalidSpread`
 
-**Logic (3-phase):**
-1. Phase 1 (validation): the checks above.
-2. Phase 2 (CPI): none. PoolState / vault init is handled by Anchor's `#[account(init)]`.
-3. Phase 3 (state): populate PoolState fields, set `paused = false` (trading available immediately on init — PoC convenience), `oracle_nonce = 0`, `last_oracle_update_slot = Clock::get()?.slot`.
+**Logic:**
+1. Validate inputs (the checks above) + assert pool_state, base_vault, quote_vault are the canonical PDAs.
+2. CPI `system_program::create_account` (PDA-signed) for `pool_state`. Then for each of `base_vault` / `quote_vault`: `create_account` (PDA-signed, owner = SPL Token) followed by `InitializeAccount3` setting the pool PDA as authority.
+3. Populate PoolState fields, set `paused = 0` (trading available immediately on init — PoC convenience), `oracle_nonce = 0`, `last_oracle_update_slot = Clock::get()?.slot`.
 
 > `initial_fair_value > 0` is enforced, so the curve can be evaluated even
 > immediately after init. With `initial_mode_ttl = 0` (Mode C), the curve is
@@ -433,9 +433,9 @@ pub struct QuoteNonceMarker {
 | `instructions_sysvar`  | Sysvar           | No  | No     | Required when ed25519 verification is needed                                                                                  |
 
 > On the curve path (the `curve_fresh` branch in Logic below),
-> `quote_nonce_marker` is unused. SDKs / users can fill a placeholder via
-> Anchor `Option<Account<...>>` or remaining_accounts — to be decided at
-> implementation time (TODO).
+> `quote_nonce_marker` is unused — the SDK simply omits the extra account.
+> On the RFQ path the marker PDA is appended as the trailing slot of the
+> account list (handler reads it from `rest @ ..` after destructuring).
 
 **Pre-execution validations:**
 - `!pool_state.paused` → `PoolPaused`
@@ -476,10 +476,10 @@ let execution_price = if curve_fresh {
     // (see pre-execution validations).
 
     // Replay block: quote_nonce_marker must be init'd to proceed. If the nonce was already used,
-    // Anchor's init will fail.
-    // The PDA is manually init'd inside this instruction (Anchor's #[account(init,...)] cannot be
-    // conditional). We accept the marker account in ctx.remaining_accounts and run
-    // system_program::create_account_invoke_signed ourselves.
+    // `system_program::create_account` will fail because the account exists.
+    // Pinocchio has no equivalent of `#[account(init)]` — we accept the marker account at the
+    // trailing position of the account slice and call `pinocchio_system::CreateAccount` ourselves
+    // (PDA-signed via `Signer::from(&[Seed::from(QUOTE_USED_SEED), …])`).
     init_quote_nonce_marker_manually(
         ctx.remaining_accounts,
         pool_state.key(),
@@ -666,7 +666,7 @@ require!(output_amount >= min_output, SlippageExceeded);
 - `quote_nonce_marker.pool == pool_state.key()` → `WrongPool`
 - `quote_nonce_marker.expiry_slot + SAFETY_BUFFER_SLOTS < current_slot` → `NonceNotYetClosable`
 
-**Logic:** Anchor `#[account(mut, close = closer)]` closes the marker and routes rent to the closer.
+**Logic:** the handler calls `safety::close_account(quote_nonce_marker, closer)` — transfers all lamports to `closer`, zeroes the data, and reassigns ownership to the System Program. (Pinocchio equivalent of Anchor's `#[account(close = closer)]`.)
 
 > Callable by anyone (closer = rent payer). Safety: `SAFETY_BUFFER_SLOTS` is
 > long enough past expiry that a "close → reuse same nonce" attack is

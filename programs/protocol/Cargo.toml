@@ -1,7 +1,7 @@
 [package]
 name = "protocol"
 version = "0.1.0"
-description = "Solana program built with Anchor"
+description = "Cipher Quants protocol — Pinocchio port of the hybrid PropAMM-RFQ settlement program"
 edition = "2021"
 license = "MIT"
 
@@ -11,20 +11,23 @@ name = "protocol"
 
 [features]
 default = []
-cpi = ["no-entrypoint"]
+# Lets a downstream crate depend on us for types without pulling the
+# Pinocchio program entrypoint (would conflict with their own).
 no-entrypoint = []
-no-idl = []
-no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
-anchor-debug = []
-custom-heap = []
-custom-panic = []
-# Extended staleness threshold for devnet oracle feeds
+# Extended staleness threshold for devnet oracle feeds.
 devnet = []
+# Test-only feature: builds the on-chain test helpers used by the
+# integration suite (parity with the prior Anchor `test-feature` flag).
+test-feature = []
 
 [dependencies]
-anchor-lang = { workspace = true }
-anchor-spl = { workspace = true }
+pinocchio = { workspace = true }
+pinocchio-system = { workspace = true }
+pinocchio-token = { workspace = true }
+pinocchio-log = { workspace = true }
+solana-address = { workspace = true }
+borsh = { workspace = true }
+shank = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

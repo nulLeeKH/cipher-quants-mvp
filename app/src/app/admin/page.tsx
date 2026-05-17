@@ -8,7 +8,7 @@ import { RefreshCw, Activity } from "lucide-react";
 import {
   deriveVault,
   PRICE_SCALE,
-} from "@solana-boilerplate/sdk";
+} from "@cipher-quants/sdk";
 
 import { AdminGuard } from "@/components/admin/AdminGuard";
 import { AdminNav } from "@/components/admin/AdminNav";
