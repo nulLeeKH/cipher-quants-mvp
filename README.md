@@ -18,12 +18,12 @@ adversarial-bot model, and stage gates live in [`docs/OPERATIONS.md`](docs/OPERA
 
 | Layer       | Stack                                                                                   |
 |-------------|-----------------------------------------------------------------------------------------|
-| On-chain    | Rust + **Pinocchio 0.11** (no Anchor runtime). 11 instructions, ~144 KB `.so`.          |
+| On-chain    | Rust + **Pinocchio 0.11** (no Anchor runtime). 11 instructions, ~141 KB `.so`.          |
 | SDK         | TypeScript (CommonJS). Hand-rolled Borsh codecs + Anchor-shaped `Program` shim — drops `@coral-xyz/anchor`. |
 | Frontend    | Next.js 14 + Solana Wallet Adapter. Mobile-first. Phantom / Solflare / Backpack / Ledger / Saga. |
 | Keeper      | Deno — oracle pusher (calls `update_oracle` while Mode A/B is active).                  |
 | API server  | Deno + Hono — RFQ webhook (JupiterZ-compatible), runs 24/7.                              |
-| Tests       | Jest + ts-jest, driven by `solana-test-validator` (`./scripts/test.sh`). 49 integration cases. |
+| Tests       | Jest + ts-jest, driven by `solana-test-validator` (`./scripts/test.sh`). 96 integration cases + 320 unit tests across rust/keeper/api/sdk/app. |
 
 ## Prerequisites
 

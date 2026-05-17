@@ -371,7 +371,7 @@ function ActionsView() {
                 <span className="text-muted-foreground">Created slot</span>
                 <span>{proposal.createdSlot.toString()}</span>
               </div>
-              {publicKey && !publicKey.equals(proposal.newAdmin) && !publicKey.equals(proposal.proposedBy) && (
+              {publicKey && !publicKey.equals(proposal.newAdmin) && !publicKey.equals(pool?.state.admin ?? PublicKey.default) && (
                 <div className="text-xs text-muted-foreground">
                   Connect the new-admin wallet to accept, or the current-admin wallet to cancel.
                 </div>
@@ -403,12 +403,19 @@ function ActionsView() {
               </Button>
               <Button
                 variant="outline"
-                disabled={busy != null || !publicKey}
+                disabled={
+                  busy != null ||
+                  !publicKey ||
+                  // On-chain: only the CURRENT admin can cancel. The new
+                  // admin declines simply by not calling accept_admin.
+                  !pool ||
+                  !publicKey.equals(pool.state.admin)
+                }
                 onClick={() =>
                   setConfirmDialog({
                     title: "Cancel proposal?",
                     description:
-                      "Removes the pending proposal. Admin stays unchanged. Either party can call this.",
+                      "Removes the pending proposal. Admin stays unchanged. Only the current admin can cancel — the proposed new admin declines simply by not accepting.",
                     action: cancelProposal,
                   })
                 }

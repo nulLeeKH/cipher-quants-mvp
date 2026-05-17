@@ -13,6 +13,7 @@ test_result.json
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # OS
 .DS_Store
@@ -33,3 +34,4 @@ keeper/keeper
 
 # TS incremental build cache (per-machine)
 *.tsbuildinfo
+.next

@@ -37,6 +37,3 @@ solana-address = { version = "2.6", default-features = false, features = ["decod
 # is byte-identical between this crate and the SDK — both must use the
 # same Borsh dialect.
 borsh = { version = "1.5", default-features = false, features = ["derive"] }
-
-# IDL annotations (consumed by `shank idl` to emit JSON for the SDK).
-shank = "0.4"

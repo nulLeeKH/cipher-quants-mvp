@@ -1,4 +1,6 @@
 packages:
   - "sdk"
   - "app"
-  - "keeper"
+# keeper/ and api/ are Deno-only (no package.json) so they're intentionally
+# absent. Their tasks live in `<dir>/deno.json` and are wrapped by
+# `pnpm keeper:dev` / `pnpm api:dev` at the repo root.

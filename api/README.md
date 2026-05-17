@@ -22,7 +22,7 @@ dedicated `quote_signer` key and rotate via `rotate_oracle_signer`.
 ## Quote rejection policies
 
 - Pool paused → 503
-- Curve is *fresh* → 404 ("use direct execute_swap")
+- Curve is *fresh* → 409 Conflict ("use direct execute_swap")
 - inputMint/outputMint not in pool → 400
 - inAmount ≤ 0 → 400
 

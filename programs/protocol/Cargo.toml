@@ -27,7 +27,6 @@ pinocchio-token = { workspace = true }
 pinocchio-log = { workspace = true }
 solana-address = { workspace = true }
 borsh = { workspace = true }
-shank = { workspace = true }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

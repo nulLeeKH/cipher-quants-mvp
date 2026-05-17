@@ -137,8 +137,9 @@ grep "consumed" .anchor/validator.log
 
 Spec v1 finalized → Pinocchio migration shipped → security audit closed →
 devnet-ready (DEPLOYMENT.md §1 all green) → comprehensive test coverage in
-place (416 tests across 5 runners: 26 Rust unit, 96 Jest integration, 129
-keeper, 37 API, 64 SDK, 64 app). Next: actually deploy to devnet (Stage 2
+place (416 tests across 6 runners: 26 Rust unit, 96 Jest integration, 129
+keeper Deno, 37 API Deno, 64 SDK Jest, 64 app Jest). Next: actually deploy
+to devnet (Stage 2
 entry) and run the 4-week soak per DEPLOYMENT.md §10.
 
 ## ⚠️ Critical Rules

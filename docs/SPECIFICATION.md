@@ -770,8 +770,9 @@ indexer parity).
 
 ### 3.11 `cancel_admin_proposal` (2-step rotation, abort path)
 
-**Purpose:** Drop a pending proposal without rotating. Callable by either
-the current admin (typo cleanup) or the proposed new admin (decline).
+**Purpose:** Drop a pending proposal without rotating (typo cleanup).
+**Only the current admin can cancel** — the proposed new admin declines by
+simply not calling `accept_admin` (no positive action required to decline).
 
 **Parameters:** none.
 
@@ -779,12 +780,13 @@ the current admin (typo cleanup) or the proposed new admin (decline).
 
 | Account | Type | Mut | Signer | Description |
 |---|---|---|---|---|
-| `admin`           | Signer                  | Yes | Yes    | Must equal `pool_state.admin` OR `proposal.new_admin`. Receives the reclaimed rent. |
+| `admin`           | Signer                  | Yes | Yes    | Must equal `pool_state.admin`. Receives the reclaimed rent. |
 | `pool_state`      | PoolState               | No  | No     | Read-only (signer check). |
 | `admin_proposal`  | AdminRotationProposal   | Yes | No     | Closed; rent → `admin`. |
 
 **Validations:**
-- `admin` is current admin OR proposed new_admin → `UnauthorizedAdmin`
+- `admin.key() == pool_state.admin` → `UnauthorizedAdmin`
+- `admin_proposal.pool == pool_state.key()` → `WrongPool`
 - `admin_proposal` is the expected PDA → `WrongPda`
 
 **Logic:** close `admin_proposal` (rent → `admin`). Emit
@@ -792,11 +794,14 @@ the current admin (typo cleanup) or the proposed new admin (decline).
 
 ---
 
-## 3.12 Events
+### 3.12 Events
 
-Every state-changing instruction emits an event via `emit!`. Used by the
-frontend history feature, keeper analytics, and external indexers. The schema
-is auto-included in the IDL, so the SDK decodes events with typed values.
+Every state-changing instruction emits an event via the Pinocchio-era
+`emit_event` helper (`Program log: EVT:<base64(tag || borsh_body)>`). Used
+by the frontend history feature, keeper analytics, and external indexers.
+The SDK exposes a `decodeEventLog` / `parseEventsFromTx` API that strips
+the prefix, base64-decodes, and Borsh-deserializes the body into the
+matching struct.
 
 | Event                  | Trigger                       | Key fields                                                                                                                                  |
 |------------------------|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|

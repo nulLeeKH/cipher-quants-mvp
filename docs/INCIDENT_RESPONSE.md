@@ -85,7 +85,7 @@ fails with `UnauthorizedOracle (6200)`).
 
 ### Step 3 — Investigate before unpausing
 
-- Pull the last 100 `OracleUpdated` events: `pnpm cu:measure -- --skip-test` (uses the same log path) and grep for `OracleUpdated`.
+- Pull the last 100 `OracleUpdated` events from the indexer / a one-shot Solana RPC `getSignaturesForAddress(pool) → getTransaction` loop, then decode via `parseEventsFromTx` from `@cipher-quants/sdk`. (`pnpm cu:measure` writes `.anchor/program-cu.log` for CU sampling, not event archival.)
 - Compare the suspect `update_oracle` payloads against the keeper's own log.
 - If the compromise predates rotation, treasury is *not* at risk (oracle key cannot withdraw); confirm by reading `pool_state.admin` is unchanged.
 

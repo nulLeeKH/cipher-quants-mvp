@@ -148,6 +148,9 @@ graph TD
     U --> UQ["User Quote ATA"]
     M -->|update_oracle| P
     M -->|set_paused / rotate_oracle_signer| P
+    M -->|propose_admin (2-step start) / cancel_admin_proposal| ARP["AdminRotationProposal<br/>PDA: ['admin_proposal', pool]<br/>pending rotation record"]
+    NA["Proposed New Admin"] -->|accept_admin (2-step finish)| ARP
+    ARP -.->|on accept: pool.admin updates| P
     K["Keeper / Anyone"]
     K -->|close_expired_nonce<br/>(after expiry+buffer elapses)| QNM
 ```
@@ -157,6 +160,7 @@ graph TD
 - **PoolState**: pricing parameters (`fair_value`, `spread_bps`, `depth_curve_params`, `inventory_skew_params`), freshness (`last_oracle_update_slot`, `oracle_nonce`, `current_mode_ttl`), authority (`admin`, `authorized_oracle_signer`), and the kill switch (`paused`). **No `reserves_*` field** — we always read `vault.amount` directly.
 - **Base Vault / Quote Vault**: actual token balances + real-time inventory single source of truth. PoolState acts as the PDA signer when transferring from a vault to the user.
 - **QuoteNonceMarker**: blocks SignedQuote replay. `init` is enforced in the RFQ path. Reclaimable via `close_expired_nonce` (acts as a sliding bitmap).
+- **AdminRotationProposal**: one-shot pending record for the 2-step admin rotation flow. Created by `propose_admin` (current admin signs, allocates the PDA + pays rent). Closed by either `accept_admin` (the proposed new admin signs, takes over) or `cancel_admin_proposal` (current admin signs, no rotation). The proposed new admin declines simply by not calling `accept_admin` (no positive action required). The `ProposalStale` error (6110) blocks acceptance if the current admin has changed since the proposal was made (e.g. via the irreversible single-step `rotate_admin`).
 - **User ATAs**: ordinary SPL Associated Token Accounts.
 
 > Full field definitions in [SPECIFICATION.md §2 (State)](SPECIFICATION.md#2-state).
@@ -171,12 +175,14 @@ graph TD
 | `base_vault`         | `[b"vault", pool_state, base_mint]`            | Yes (PoolState.base_vault_bump)      | Pool's base-token vault                                                  |
 | `quote_vault`        | `[b"vault", pool_state, quote_mint]`           | Yes (PoolState.quote_vault_bump)     | Pool's quote-token vault                                                 |
 | `quote_nonce_marker` | `[b"quote_used", pool_state, nonce_le_bytes]`  | Yes (QuoteNonceMarker.bump)          | Blocks RFQ quote replay (one-shot)                                       |
+| `admin_proposal`     | `[b"admin_proposal", pool_state]`              | Yes (AdminRotationProposal.bump)     | One-shot record for 2-step admin rotation (propose → accept / cancel)    |
 
 **Invariants:**
 - The (base_mint, quote_mint) pair must be sorted lexicographically (`base_mint < quote_mint`) → prevents duplicate pools.
 - All bumps are stored (saves CPI signer-seed reconstruction cost).
 - `authorized_oracle_signer` is a PoolState field (not a PDA — just a Pubkey); rotatable via `rotate_oracle_signer`.
 - `quote_nonce_marker` is `init`'d only on the RFQ path. The curve path never touches it — RFQ-only PDA.
+- `admin_proposal` is created by `propose_admin` and closed (rent reclaimed) by either `accept_admin` (rent → new admin) or `cancel_admin_proposal` (rent → current admin, only current admin can cancel). Only one outstanding proposal per pool at a time (PDA collision blocks a second `propose_admin`).
 
 ---
 
