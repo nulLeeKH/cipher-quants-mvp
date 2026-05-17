@@ -30,3 +30,6 @@ keeper/keeper
 
 # Build artifacts
 *.so
+
+# TS incremental build cache (per-machine)
+*.tsbuildinfo
