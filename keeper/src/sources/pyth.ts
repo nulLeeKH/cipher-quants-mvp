@@ -261,6 +261,9 @@ export class PythPriceSource implements PriceSource {
         signal: this.abort.signal,
       });
       if (!resp.ok) {
+        // Drain the body before bailing — leaving it open leaks the
+        // connection (Deno's test runner asserts on this).
+        await resp.body?.cancel().catch(() => {});
         const msg = `[pyth] HTTP ${resp.status} from ${url}`;
         if (throwOnError) throw new Error(msg);
         console.warn(msg);

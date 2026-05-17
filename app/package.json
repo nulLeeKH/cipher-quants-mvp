@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "jest"
   },
   "dependencies": {
     "@cipher-quants/sdk": "workspace:*",
@@ -40,8 +41,38 @@
     "@types/react-dom": "^18.3.0",
     "@types/node": "^20.0.0",
     "@types/bn.js": "^5.1.0",
+    "@types/jest": "^29.0.3",
+    "jest": "^29.0.3",
+    "jest-environment-jsdom": "^29.7.0",
+    "ts-jest": "^29.0.2",
+    "@testing-library/react": "^16.0.0",
+    "@testing-library/jest-dom": "^6.5.0",
     "tailwindcss": "^3.4.0",
     "postcss": "^8.4.0",
     "autoprefixer": "^10.4.0"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "globals": {
+      "ts-jest": {
+        "tsconfig": "tsconfig.test.json"
+      }
+    },
+    "transform": {
+      "^.+\\.tsx?$": ["ts-jest", { "tsconfig": "tsconfig.test.json" }]
+    },
+    "testEnvironment": "jsdom",
+    "testPathIgnorePatterns": ["/node_modules/", "/.next/"],
+    "transformIgnorePatterns": [
+      "node_modules/.pnpm/(?!(uuid|jayson|@noble\\+|@solana\\+|jose|superstruct|rpc-websockets|@coral-xyz\\+)@)",
+      "node_modules/(?!(uuid|jayson|@noble|@solana|jose|superstruct|rpc-websockets|@coral-xyz)/)"
+    ],
+    "moduleNameMapper": {
+      "^@/(.*)$": "<rootDir>/src/$1",
+      "^@cipher-quants/sdk$": "<rootDir>/../sdk/dist/index.js",
+      "^@cipher-quants/sdk/(.*)$": "<rootDir>/../sdk/dist/$1"
+    },
+    "setupFiles": ["<rootDir>/jest.polyfills.ts"],
+    "setupFilesAfterEnv": ["<rootDir>/jest.setup.ts"]
   }
 }

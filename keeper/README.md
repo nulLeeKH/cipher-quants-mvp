@@ -6,7 +6,7 @@ active**, it pushes `update_oracle` in real time to keep the curve fresh.
 ## Responsibilities (Keeper *only*)
 
 - **Oracle write** — push `update_oracle` every ~200ms in Mode A, threshold-triggered in Mode B.
-- **Price-source integration** — synthesize fair_value from Finnhub / Pyth / CEX feeds (PoC currently ships MockPriceSource).
+- **Price-source integration** — composable pipeline (`PriceSource` interface + `FailoverPriceSource` + `BasisAdjustedSource`). Ships `MockPriceSource` (random walk, dev/CI) and `PythPriceSource` (Pyth Hermes SSE/poll, production). Additional adapters (Finnhub, Yahoo, on-chain Pyth, …) drop in as one-file additions.
 - **Automatic mode switching** — RV/NBBO-driven A/B/C decisions with hysteresis.
 - **Single-writer nonce** — in-memory monotonic counter (seeded from the on-chain nonce on boot).
 
@@ -63,15 +63,19 @@ keeper/src/
 ├── wallet.ts         # KeypairProvider (PoC: JsonFile; future: Turnkey/KMS)
 ├── connection.ts     # RpcAdapter abstraction
 ├── program.ts        # Anchor Provider + SDK Program
-├── service.ts        # legacy boilerplate placeholder (unused)
-├── sources/          # PriceSource interface + Mock impl
-│   ├── types.ts
-│   ├── mock.ts       # Random walk + spike
+├── sources/          # Composable PriceSource pipeline
+│   ├── types.ts      # PriceSource interface + PriceTickStatus + priceToFairValue
+│   ├── mock.ts       # Random walk + spike (dev/CI)
+│   ├── pyth.ts       # Pyth Hermes adapter (SSE default, polling fallback)
+│   ├── basis.ts      # Underlying → tokenized basis adjustment wrapper
+│   ├── failover.ts   # Multi-source priority + status-rank fallback
+│   ├── factory.ts    # Env-driven pipeline composition
 │   └── index.ts
 ├── oracle/           # Oracle worker
-│   ├── state.ts      # OracleSharedState (mode, nonce, latest tick)
-│   ├── mode.ts       # Mode decision (RV/NBBO + hysteresis)
-│   ├── worker.ts     # Push loop
+│   ├── state.ts        # OracleSharedState (mode, nonce, latest tick)
+│   ├── mode.ts         # Mode decision (RV/NBBO + hysteresis + NYSE calendar)
+│   ├── stale_policy.ts # 30s-of-non-fresh → force Mode C (pure helper)
+│   ├── worker.ts       # Push loop
 │   └── index.ts
 └── commands/         # CLI subcommands
     ├── init_pool.ts
@@ -94,14 +98,43 @@ policy.
 
 ## Data sources
 
-The PoC uses [MockPriceSource](src/sources/mock.ts) — random walk + spike.
-Wire up Finnhub / Pyth adapters right before Stage 1 entry
-([TODO.md §1](../TODO.md)).
+The keeper composes its price feed at boot from env vars (see `.env.example`):
+
+```
+primary (mock | pyth)
+  └─► FailoverPriceSource (optional, comma-separated env)
+        └─► BasisAdjustedSource (optional, signed bps)
+              └─► worker.pushOracle()
+```
+
+`PRICE_SOURCE=mock` is fine for localnet / CI; `PRICE_SOURCE=pyth` consumes
+the free [Pyth Hermes](https://hermes.pyth.network) feed (SSE by default,
+polling as fallback). Pyth publishes the *underlying* asset price — for
+tokenized representations (xStocks) set `BASIS_ADJUSTMENT_BPS` to the
+measured basis vs underlying. See [sources/basis.ts](src/sources/basis.ts)
+and [sources/factory.ts](src/sources/factory.ts).
+
+Every tick carries a `status` field (`fresh|stale|halted|unknown`). The
+worker refuses to push anything but `"fresh"` and force-downgrades to
+Mode C after 30 s of consecutive non-fresh ticks — so RFQ-only fallback
+engages automatically when Pyth equity feeds go quiet after the NYSE
+close. The policy lives in [stale_policy.ts](src/oracle/stale_policy.ts)
+as a pure helper for unit-testability.
+
+Adding a new adapter (Finnhub, Yahoo, on-chain Pyth, …) is a one-file
+change in `src/sources/` + a factory branch. [TODO.md §1](../TODO.md)
+tracks the planned second adapter.
+
+## Tests
+
+```bash
+deno task test                 # All keeper unit tests (no network)
+deno task check                # tsc-equivalent
+```
 
 ## Build / Compile
 
 ```bash
-deno task check                # Type-check
 deno task compile              # Standalone binary: ./keeper-bot
 ```
 

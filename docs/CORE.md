@@ -83,7 +83,7 @@ upgrade in the middle of a spike.
 
 ```
 loop:
-  1. tick ← priceSource.current()                          # MockPriceSource (PoC)
+  1. tick ← priceSource.current()                          # mock | pyth | failover(...) | basis(...)
   2. update rolling 30 s NBBO EMA (α = 0.2)
   3. nextMode ← decideMode(current, tick, …)
   4. if nextMode != currentMode:
@@ -95,7 +95,26 @@ loop:
   5. sleep(intervalMs - elapsed)
      # ≥3 consecutive push failures → exponential backoff (capped at 30 s)
      # ≥5, then every 10 failures → re-sync nonce from chain
+
+pushOracle(mode):
+  tick = source.current()
+  if tick.status != "fresh":                              # NEW — stale/halted/unknown
+    log warning, return false                             # → keeper does NOT push
+  # ... build + send update_oracle ix as before ...
+
+notePush(ok):                                             # NEW — stale-tick policy
+  if ok: clear staleness clock
+  else:  start (or continue) the clock
+  if non-fresh persists > 30 s and not already Mode C:
+    force-downgrade to Mode C, log warning                # → RFQ-only fallback
 ```
+
+The staleness gating ensures we never advertise an out-of-date curve
+on-chain — when Pyth equity feeds go quiet after NYSE close, the worker
+holds the existing TTL until it expires naturally and lets RFQ take over.
+The 30-second policy lives as a pure helper in
+[oracle/stale_policy.ts](../keeper/src/oracle/stale_policy.ts) so the
+decision is unit-tested independently of the worker closure.
 
 **Single-writer nonce.** `state.lastPushedNonce` is an in-memory counter,
 seeded from on-chain nonce at boot, incremented on push success, untouched on
@@ -208,7 +227,57 @@ output = (Buy)  input_amount * PRICE_SCALE / price
 Floor rounding protects the protocol. `output < min_output` triggers
 `SlippageExceeded`.
 
-### 2.4 Recommended parameters
+### 2.4 Price-source pipeline (off-chain → fair_value)
+
+The on-chain curve consumes whatever `fair_value` the keeper pushes. How
+that number is *produced* off-chain is a composable pipeline:
+
+```
+   primary source        (MockPriceSource | PythPriceSource)
+     └─► FailoverPriceSource  (optional — multi-source priority order)
+           └─► BasisAdjustedSource  (optional — underlying → tokenized basis bps)
+                 └─► keeper.pushOracle()
+```
+
+**Source contract** — every adapter returns a `PriceTick`:
+
+```
+{ fairValue, confidenceBps, realizedVolBps, timestamp, status }
+
+status ∈ { "fresh", "stale", "halted", "unknown" }
+```
+
+The worker pushes only when `status === "fresh"`. Other statuses signal
+"don't advertise this as a usable curve."
+
+**Pyth Hermes adapter** ([sources/pyth.ts](../keeper/src/sources/pyth.ts)) —
+SSE streaming by default (push-based, matches Pyth's ~400 ms publish
+cadence with no polling RTT), polling as fallback. Halted detection
+(`price ≤ 0` or `conf == 0` → status="halted"). Staleness check at read
+time (`now − publish_time > maxStalenessSec` → status="stale"). EMA
+option for less-reactive smoothed pricing.
+
+**Basis adjustment** ([sources/basis.ts](../keeper/src/sources/basis.ts)) —
+Pyth publishes the *underlying* (NYSE AAPL, native BTC). Tokenized
+assets (xStocks etc.) trade with a basis (premium/discount, redemption
+cost). The wrapper applies a signed bps offset:
+
+```
+fair_value_out = fair_value_in × (10_000 + basisBps) / 10_000
+```
+
+`basisBps = 0` is a no-op (correct for crypto pairs). For xStocks
+measure the average basis over a window; future work replaces the
+constant with a dynamic basis feed (on-chain xStock price, Jupiter
+LP-implied price) without changing the worker.
+
+**Failover** ([sources/failover.ts](../keeper/src/sources/failover.ts)) —
+wraps N sources in priority order. `current()` walks the list and
+returns the first `"fresh"` tick. If none fresh, returns the
+status-best-ranked tick (`fresh > stale > halted > unknown`) so the
+worker sees the explicit failure mode rather than silent fallback.
+
+### 2.5 Recommended parameters
 
 PoC defaults (init_pool):
 

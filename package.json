@@ -13,6 +13,8 @@
     "build:devnet": "./scripts/build.sh devnet",
     "build:localnet": "./scripts/build.sh localnet",
     "test": "pnpm sdk:build && ./scripts/test.sh",
+    "test:all": "pnpm test && pnpm --filter @cipher-quants/sdk test && pnpm --filter @solana-boilerplate/app test && (cd keeper && deno task test) && (cd api && deno task test)",
+    "test:unit": "pnpm --filter @cipher-quants/sdk test && pnpm --filter @solana-boilerplate/app test && (cd keeper && deno task test) && (cd api && deno task test)",
     "validator:up": "./scripts/validator-up.sh",
     "validator:down": "./scripts/validator-down.sh",
     "cu:measure": "./scripts/measure-cu.sh",
@@ -43,7 +45,8 @@
       "/node_modules/",
       "/keeper/",
       "/api/",
-      "/app/"
+      "/app/",
+      "/sdk/"
     ]
   },
   "pnpm": {
