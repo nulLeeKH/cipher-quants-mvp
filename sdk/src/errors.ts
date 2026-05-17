@@ -63,7 +63,6 @@ export const ERROR_CODE_NAMES: Record<number, string> = {
   6510: "UnknownInstruction",
   6511: "InvalidInstructionData",
   6512: "NotEnoughAccountKeys",
-  6599: "NotYetImplemented",
 };
 
 export function errorCodeToName(code: number): string | null {
@@ -123,7 +122,6 @@ export const ERROR_CODE_MESSAGES: Record<number, string> = {
   6510: "Unknown instruction tag",
   6511: "Invalid instruction data (Borsh decode failed)",
   6512: "Not enough account keys provided",
-  6599: "Instruction handler not yet implemented",
 };
 
 export function errorCodeToMessage(code: number): string {

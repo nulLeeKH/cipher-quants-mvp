@@ -62,6 +62,25 @@ pub enum InstructionTag {
     CancelAdminProposal = 10,
 }
 
+// The dispatch table below matches on raw `u8` literals (Rust pattern arms
+// can't reference enum values as patterns without const-generic gymnastics),
+// so the enum and the match arms are two copies of the same information. To
+// catch drift at compile time, statically assert that each enum tag still
+// equals the numeric literal the dispatcher routes on.
+const _: () = {
+    assert!(InstructionTag::InitPool as u8 == 0);
+    assert!(InstructionTag::UpdateOracle as u8 == 1);
+    assert!(InstructionTag::ExecuteSwap as u8 == 2);
+    assert!(InstructionTag::SetPaused as u8 == 3);
+    assert!(InstructionTag::RotateOracleSigner as u8 == 4);
+    assert!(InstructionTag::RotateAdmin as u8 == 5);
+    assert!(InstructionTag::AdminWithdrawInventory as u8 == 6);
+    assert!(InstructionTag::CloseExpiredNonce as u8 == 7);
+    assert!(InstructionTag::ProposeAdmin as u8 == 8);
+    assert!(InstructionTag::AcceptAdmin as u8 == 9);
+    assert!(InstructionTag::CancelAdminProposal as u8 == 10);
+};
+
 // We are `no_std` for the on-chain target. The default `entrypoint!` macro
 // emits `default_panic_handler!` which is only a *hook* on top of Rust's std
 // panic handler — fine for std builds, but on-chain `no_std` needs a real

@@ -85,10 +85,6 @@ pub enum ProtocolError {
     InvalidInstructionData = 6511,
     /// Required account was not provided in the accounts slice.
     NotEnoughAccountKeys = 6512,
-    /// An instruction handler hasn't been ported to Pinocchio yet.
-    /// Temporary code while the migration is in flight — remove once every
-    /// dispatcher arm is wired to a real handler.
-    NotYetImplemented = 6599,
 }
 
 impl From<ProtocolError> for ProgramError {

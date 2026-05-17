@@ -67,7 +67,9 @@ pub fn process(
     if base_mint == quote_mint {
         return Err(ProtocolError::InvalidMintPair.into());
     }
-    if base_mint.as_array() >= quote_mint.as_array() {
+    // Strict `>` — equality is already caught above with the more specific
+    // InvalidMintPair error.
+    if base_mint.as_array() > quote_mint.as_array() {
         return Err(ProtocolError::MintsNotSorted.into());
     }
     if args.authorized_oracle_signer == Address::default() {

@@ -362,12 +362,15 @@ export async function startApiServer(
       const curveAge = currentSlot - pool.lastOracleUpdateSlot.toNumber();
       const curveFresh = pool.currentModeTtl > 0 && curveAge <= pool.currentModeTtl;
       if (curveFresh) {
+        // 409 Conflict: the request is well-formed, but the pool's current
+        // state (fresh curve) makes the RFQ path the wrong choice. 404 was
+        // misleading — the endpoint exists; the caller should switch paths.
         return c.json(
           {
             error:
               "Curve is fresh — use direct execute_swap (curve path) instead",
           },
-          404
+          409
         );
       }
 
