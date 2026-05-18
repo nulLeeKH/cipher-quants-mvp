@@ -1,5 +1,5 @@
 {
-  "name": "@solana-boilerplate/app",
+  "name": "@cipher-quants/app",
   "version": "0.0.1",
   "private": true,
   "scripts": {

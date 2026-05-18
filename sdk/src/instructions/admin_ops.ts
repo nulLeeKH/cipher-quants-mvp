@@ -105,7 +105,7 @@ export async function createCloseExpiredNonceIx(
 }
 
 // ============================================================================
-// propose_admin / accept_admin / cancel_admin_proposal — SPECIFICATION §3.7
+// propose_admin / accept_admin / cancel_admin_proposal — SPECIFICATION §3.9–§3.11
 // ============================================================================
 
 export async function createProposeAdminIx(

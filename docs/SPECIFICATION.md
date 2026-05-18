@@ -269,6 +269,32 @@ pub struct SignedQuoteMessage {
 > library (Borsh) and field order**. Any mismatch fails verification with
 > `QuoteSignatureInvalid` (code 6306).
 
+### 2.4 `QuoteNonceMarker` (replay-guard PDA account)
+
+```rust
+// Borsh-encoded account, 8-byte tag discriminator at offset 0
+pub struct QuoteNonceMarker {
+    pub pool: Pubkey,         // Which pool this nonce belongs to.
+    pub nonce: u64,           // The nonce value this marker represents.
+    pub expiry_slot: u64,     // Used to determine when close is allowed.
+    pub bump: u8,
+    pub _reserved: [u8; 7],
+}
+```
+
+- **PDA seeds**: `[b"quote_used", pool, nonce.to_le_bytes()]`
+- **Lifecycle**:
+  - `execute_swap` **forces init** → already existing means the instruction fails = replay blocked.
+  - Once `expiry_slot + SAFETY_BUFFER_SLOTS < current_slot`, the `close_expired_nonce` instruction can close the account and reclaim rent.
+- **Sliding-bitmap effect**: nonce slots are reclaimed after use → no permanent occupancy. The SAFETY_BUFFER prevents a "close → reuse same nonce" attack.
+
+**MM nonce-issuance policy (operational rule):**
+- The RFQ webhook issues a **monotonically increasing nonce** per quote (e.g., microsecond timestamp or an atomic counter).
+- Never reuse the same nonce for a different quote.
+- The u64 nonce space (~1.8 × 10^19) makes collisions effectively impossible.
+- Reusing a nonce after close is forbidden at the policy level (the program would allow it, but we forbid it operationally).
+- The keeper batches `close_expired_nonce` calls periodically → rent reclaim becomes efficient ([OPERATIONS.md §6](OPERATIONS.md)).
+
 ### 2.5 `AdminRotationProposal` (2-step admin rotation PDA account)
 
 ```rust
@@ -295,32 +321,6 @@ pub struct AdminRotationProposal {
   proposal from completing after the current admin has changed via the
   irreversible single-step `rotate_admin` (or via a prior accept-cancel
   race).
-
-### 2.4 `QuoteNonceMarker` (replay-guard PDA account)
-
-```rust
-// Borsh-encoded account, 8-byte tag discriminator at offset 0
-pub struct QuoteNonceMarker {
-    pub pool: Pubkey,         // Which pool this nonce belongs to.
-    pub nonce: u64,           // The nonce value this marker represents.
-    pub expiry_slot: u64,     // Used to determine when close is allowed.
-    pub bump: u8,
-    pub _reserved: [u8; 7],
-}
-```
-
-- **PDA seeds**: `[b"quote_used", pool, nonce.to_le_bytes()]`
-- **Lifecycle**:
-  - `execute_swap` **forces init** → already existing means the instruction fails = replay blocked.
-  - Once `expiry_slot + SAFETY_BUFFER_SLOTS < current_slot`, the `close_expired_nonce` instruction can close the account and reclaim rent.
-- **Sliding-bitmap effect**: nonce slots are reclaimed after use → no permanent occupancy. The SAFETY_BUFFER prevents a "close → reuse same nonce" attack.
-
-**MM nonce-issuance policy (operational rule):**
-- The RFQ webhook issues a **monotonically increasing nonce** per quote (e.g., microsecond timestamp or an atomic counter).
-- Never reuse the same nonce for a different quote.
-- The u64 nonce space (~1.8 × 10^19) makes collisions effectively impossible.
-- Reusing a nonce after close is forbidden at the policy level (the program would allow it, but we forbid it operationally).
-- The keeper batches `close_expired_nonce` calls periodically → rent reclaim becomes efficient ([OPERATIONS.md §6](OPERATIONS.md)).
 
 ---
 
@@ -884,14 +884,24 @@ matching struct.
 
 | Constant | Value | Description |
 |---|---|---|
-| `POOL_SEED` | `b"pool"` | PoolState PDA seed prefix |
-| `VAULT_SEED` | `b"vault"` | Vault PDA seed prefix |
-| `MAX_TTL_SLOTS`         | `8`        | **Code-level hard cap** — `update_oracle` rejects any TTL above this (`InvalidTtl`). Operational recommendations (Mode A=1, B=3, C=0) are a separate policy (OPERATIONS §1). The cap exceeds the operational values to allow tuning margin + leverage the max during tests to *guarantee curve_age*. |
-| `MAX_SPREAD_BPS`        | `1000`     | Maximum spread = 10% (sanity guard)                                                                                                                                                                                                                        |
-| `MAX_DEPTH_BPS`         | `500`      | Upper bound on DepthParams.max_depth_bps (5%)                                                                                                                                                                                                              |
-| `MAX_SKEW_OFFSET_BPS`   | `500`      | Upper bound on SkewParams.max_skew_offset_bps (5%)                                                                                                                                                                                                         |
-| `SAFETY_BUFFER_SLOTS`   | `150`      | Buffer for the `QuoteNonceMarker` close condition (`expiry_slot + buffer < now`). ~1 minute                                                                                                                                                                |
-| `PRICE_SCALE`           | `1_000_000`| Integer scale for fair_value / price (1e6)                                                                                                                                                                                                                 |
+| `POOL_SEED`             | `b"pool"`           | PoolState PDA seed prefix |
+| `VAULT_SEED`            | `b"vault"`          | Vault PDA seed prefix |
+| `QUOTE_USED_SEED`       | `b"quote_used"`     | QuoteNonceMarker PDA seed prefix |
+| `ADMIN_PROPOSAL_SEED`   | `b"admin_proposal"` | AdminRotationProposal PDA seed prefix |
+| `MAX_TTL_SLOTS`         | `8`                 | **Code-level hard cap** — `update_oracle` rejects any TTL above this (`InvalidTtl`). Operational recommendations (Mode A=1, B=3, C=0) are a separate policy (OPERATIONS §1). The cap exceeds the operational values to allow tuning margin + leverage the max during tests to *guarantee curve_age*. |
+| `MAX_SPREAD_BPS`        | `1_000`             | Maximum spread = 10% (sanity guard) |
+| `MAX_DEPTH_BPS`         | `500`               | Upper bound on `DepthParams.max_depth_bps` (5%) |
+| `MAX_SKEW_OFFSET_BPS`   | `500`               | Upper bound on `SkewParams.max_skew_offset_bps` (5%) |
+| `SAFETY_BUFFER_SLOTS`   | `150` (prod) / `5` (`test-feature` cfg) | Buffer for the `QuoteNonceMarker` close condition (`expiry_slot + buffer < now`). ~1 minute in production; flipped to 5 slots under `test-feature` so the close-expired-nonce integration test doesn't burn 60s per case. |
+| `PRICE_SCALE`           | `1_000_000`         | Integer scale for fair_value / price (1e6) |
+| `BPS_DENOMINATOR`       | `10_000`            | Denominator for bps math (referenced in the price-computation invariant) |
+| `MODE_A_TTL`, `MODE_B_TTL`, `MODE_C_TTL` | `1`, `3`, `0` | Recommended operating TTLs per mode (off-chain hint; not enforced on-chain beyond `MAX_TTL_SLOTS`) |
+| `PROGRAM_ID`            | `3br2wCsEN…NxNMy` | Mirror of `declare_id!`; a compile-time `assert!` in `lib.rs` enforces they match |
+| `TOKEN_PROGRAM_ID`      | `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` | SPL Token classic |
+| `SYSTEM_PROGRAM_ID`     | `11111111111111111111111111111111` | — |
+| `ED25519_PROGRAM_ID`    | `Ed25519SigVerify111111111111111111111111111` | Solana native ed25519 verify precompile (used by RFQ path) |
+| `INSTRUCTIONS_SYSVAR_ID`| `Sysvar1nstructions1111111111111111111111111` | Used by execute_swap to cross-check the prepended ed25519 verify ix |
+| `RENT_SYSVAR_ID`        | `SysvarRent111111111111111111111111111111111` | Legacy slot; we use `InitializeAccount3` so the rent sysvar isn't actually required by SPL Token CPIs |
 
 **Price-computation invariant** (underflow prevention):
 
@@ -917,34 +927,61 @@ When this inequality holds, `|total_bps| < 10_000`, so `(10_000 + total_bps)` ne
 
 ## 6. SDK interface (TypeScript)
 
-Builders that land in `sdk/src/instructions/`:
+The Pinocchio-era SDK ships an Anchor-shaped `Program` shim on top of the
+1-byte-tag + Borsh dispatch (no `@coral-xyz/anchor` runtime dep). Two
+parallel surfaces are exposed:
 
-| Function                       | Signature                                                                                                                            |
+**Surface A — `program.methods.X(args).accountsPartial(...).rpc()`** (Anchor
+parity, for existing call sites). Available for all 11 instructions.
+
+**Surface B — raw builders that return `TransactionInstruction`** (composable
+for multi-ix transactions, prepended ed25519, ComputeBudget priority fee,
+etc.). Live in `sdk/src/instructions/`:
+
+| Function                                | Signature |
 |---|---|
-| `initPool(...)` | `(admin, baseMint, quoteMint, params) → TransactionInstruction` |
-| `updateOracle(...)` | `(oracleSigner, pool, params) → TransactionInstruction` |
-| `executeSwap(...)`             | `(user, pool, inputAmount, direction, minOutput, signedQuote?) → Transaction (includes ed25519 prepend)`                              |
-| `setPaused(...)` | `(admin, pool, paused) → TransactionInstruction` |
-| `rotateOracleSigner(...)` | `(admin, pool, newSigner) → TransactionInstruction` |
-| `adminWithdrawInventory(...)` | `(admin, pool, baseAmount, quoteAmount) → TransactionInstruction` |
-| `closeExpiredNonce(...)` | `(closer, pool, marker) → TransactionInstruction` |
-| `simulateSwap(...)`            | `(pool, inputAmount, direction) → { mode: "curve"|"rfq", expectedOutput, price, requiresQuote: bool }` — **pre-trade quote simulation** |
-| `requestQuote(...)`            | `(pool, inputAmount, direction) → SignedQuote` — calls the RFQ webhook (for curve-stale fallback)                                     |
+| `createInitPoolIx`                      | `(program, params) → TransactionInstruction` |
+| `createUpdateOracleIx`                  | `(program, params) → TransactionInstruction` |
+| `createExecuteSwapIx`                   | `(program, params) → TransactionInstruction` — `params.signedQuote ?? null` decides curve vs RFQ path |
+| `createSetPausedIx`                     | `(program, {admin, poolState, paused}) → TransactionInstruction` |
+| `createRotateOracleSignerIx`            | `(program, {admin, poolState, newAuthorizedOracleSigner}) → TransactionInstruction` |
+| `createRotateAdminIx`                   | `(program, {admin, poolState, newAdmin}) → TransactionInstruction` (single-step) |
+| `createProposeAdminIx`                  | `(program, {admin, poolState, newAdmin}) → TransactionInstruction` (2-step start) |
+| `createAcceptAdminIx`                   | `(program, {newAdmin, poolState}) → TransactionInstruction` (2-step finish) |
+| `createCancelAdminProposalIx`           | `(program, {admin, poolState}) → TransactionInstruction` |
+| `createAdminWithdrawInventoryIx`        | `(program, params) → TransactionInstruction` |
+| `createCloseExpiredNonceIx`             | `(program, {closer, poolState, quoteNonceMarker}) → TransactionInstruction` |
+
+**Helpers** (`sdk/src/quote.ts`, `sdk/src/math/curve.ts`, etc.):
+
+| Function | Purpose |
+|---|---|
+| `serializeSignedQuoteMessage(msg)` | Canonical 97-byte Borsh body for the RFQ signing path |
+| `buildSignedQuoteWithVerifyIx(oracleSigner, msg)` | Returns `{ signedQuote, verifyIx, messageBytes }` — sign + the matching Ed25519 verify ix |
+| `executeSwapWithVerify(program, params)` | RFQ-path wrapper. Auto-derives the `quote_nonce_marker` PDA, returns `[verifyIx, swapIx]` for the caller to bundle |
+| `simulateSwap(inputs)` | Bit-identical TS port of `curve::evaluate` + ExactIn output. Returns `{ price, outputAmount }`. Caller decides curve vs RFQ from freshness — the SDK does not call the webhook itself |
+| `directionFromMints(input, output, base, quote)` | Maps a router's `(input_mint, output_mint)` intent to the on-chain `Side` enum |
+| `parseEventsFromTx(connection, sig)` / `parseEventsFromLogs(logs)` | Decodes all 10 event types from a tx |
+| `friendlyError(err)` | Translates any program error shape into the human message |
 
 **simulate semantics:**
-- Reads `PoolState` + `vault.amount` → runs the same `curve::evaluate` logic in TypeScript for client-side simulation.
-- When the curve is fresh: `mode="curve"`, returns the computed `expectedOutput`.
-- When stale: `mode="rfq"`, `requiresQuote=true` → the frontend must call `requestQuote` separately.
-- Must match the on-chain logic *bit-for-bit* (branches + rounding included).
+- Reads `PoolState` + `vault.amount` → runs the same `curve::evaluate` logic in TypeScript for client-side preview.
+- Bit-for-bit match with on-chain logic (golden-byte tested against
+  `programs/protocol/src/math/curve.rs` unit tests).
+- Caller checks `freshness` (current_slot vs `pool.last_oracle_update_slot`)
+  to decide curve vs RFQ path — the simulator itself is path-agnostic.
 
-The SDK also exposes an RFQ-webhook helper (translates the Jupiter-standard
-response into `SignedQuote` and auto-prepends the ed25519 verify instruction).
+The RFQ webhook (separate Deno service in `api/`) returns a JupiterZ-shaped
+JSON response containing a `signedQuote` + the base64-encoded ed25519
+`verifyIx`; the SDK doesn't bundle a webhook client (consumers do a plain
+`fetch(API_BASE_URL + "/quote", ...)`).
 
 ---
 
 ## 7. Changelog
 
-| Version | Date       | Change                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Version | Date       | Change |
 |---|---|---|
+| v0.3    | 2026-05-18 | Pinocchio 0.11 port (drops `@coral-xyz/anchor` runtime). (1) Added 2-step admin rotation: `propose_admin` / `accept_admin` / `cancel_admin_proposal` (§3.9-3.11) + `AdminRotationProposal` state (§2.5) + `AdminProposalCreated`/`AdminProposalCancelled` events. (2) Error code surface expanded to 41 (added §61xx parameter checks, §63xx `QuoteAlreadyUsed`, §65xx safety-helper category). (3) Constants surface expanded: added `QUOTE_USED_SEED`, `ADMIN_PROPOSAL_SEED`, `BPS_DENOMINATOR`, `MODE_*_TTL`, sysvars, ed25519 program (§5). (4) Events emit-path changed from `emit!` macro to manual `sol_log_` with `EVT:<base64(tag‖borsh)>` framing. (5) SDK shim: Anchor-shaped `Program.methods.X.rpc()` surface preserved + raw `TransactionInstruction` builders for all 11 instructions + `simulateSwap` bit-identical TS port. (6) `SAFETY_BUFFER_SLOTS` cfg-gated under `test-feature` (5 slots for tests, 150 for prod). |
 | v0.2    | 2026-05-15 | (1) ExactIn interface + curve_evaluate unit conversion documented (Buy: quote → base equivalent). (2) New `admin_withdraw_inventory` instruction (vault → admin ATA). (3) Fixed skew_offset sign (imbalance = target − current; base-heavy ⇒ mid drops). (4) Specified SignedQuote canonical Borsh format (97 bytes) + MM monotonic nonce policy. (5) Applied `saturating_sub` (fork rollback). (6) 6-step init operational procedure. (7) Sanity-guard decision (not applied). (8) Quote replay = per-quote PDA + close reclaim. |
-| v0.1    | 2026-05-15 | Initial draft — defined 3 instructions.                                                                                                                                                                                                                                                                                                                                                                                              |
+| v0.1    | 2026-05-15 | Initial draft — defined 3 instructions. |

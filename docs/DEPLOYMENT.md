@@ -139,12 +139,12 @@ Run top-to-bottom. Each check is binary and gated by a concrete command.
 - [ ] Working tree clean: `git status` returns nothing untracked or staged.
 - [ ] Target branch (`main`) is up to date with origin.
 - [ ] No `TODO` / `FIXME` markers added since the last review
-      (`grep -rn "TODO\|FIXME\|XXX\|HACK" --include="*.rs" --include="*.ts" programs/ sdk/ keeper/ api/ app/src/` baseline = the single hit in `keeper/src/commands/oracle.ts:18`, which references TODO.md §1).
+      (`grep -rn --exclude-dir=node_modules --exclude-dir=dist --exclude-dir=target --exclude-dir=.next "TODO\|FIXME\|XXX\|HACK" --include="*.rs" --include="*.ts" --include="*.tsx" programs/ sdk/src keeper/src api/src app/src/` baseline = exactly two hits, both in `keeper/src/sources/` referencing TODO.md §1).
 
-### 2.2 Tests pass (96/96)
+### 2.2 Tests pass (97/97)
 
 - [ ] `cargo test -p protocol --lib` — Rust unit suite, <1s.
-- [ ] `pnpm test` — full integration (96 tests, ~110s, requires
+- [ ] `pnpm test` — full integration (97 tests, ~110s, requires
       `solana-test-validator`).
 - [ ] `cat test_result.json | jq '.numFailedTests'` returns `0`.
 
@@ -455,8 +455,8 @@ After ≥ 4 weeks on devnet, verify all of the following:
 - [ ] **Real PriceSource adapter shipped** — Finnhub free or Yahoo
       unofficial at minimum (§1.2).
 - [ ] **Adversarial bot run completed** — at least one of the four
-      policies in [OPERATIONS.md §9](OPERATIONS.md) was exercised against
-      our devnet pool with measurable PnL deltas.
+      policies in [OPERATIONS.md §11.3 + §11.5](OPERATIONS.md#113-four-baseline-policies-off-chain-simulator-comparison)
+      was exercised against our devnet pool with measurable PnL deltas.
 - [ ] **No outstanding SEV-1 incidents** in the past 14 days.
 - [ ] **Backup & recovery drill** — admin pause executed end-to-end from a
       cold-key recovery path within 5 minutes (INCIDENT_RESPONSE §0).

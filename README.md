@@ -23,7 +23,7 @@ adversarial-bot model, and stage gates live in [`docs/OPERATIONS.md`](docs/OPERA
 | Frontend    | Next.js 14 + Solana Wallet Adapter. Mobile-first. Phantom / Solflare / Backpack / Ledger / Saga. |
 | Keeper      | Deno — oracle pusher (calls `update_oracle` while Mode A/B is active).                  |
 | API server  | Deno + Hono — RFQ webhook (JupiterZ-compatible), runs 24/7.                              |
-| Tests       | Jest + ts-jest, driven by `solana-test-validator` (`./scripts/test.sh`). 96 integration cases + 320 unit tests across rust/keeper/api/sdk/app. |
+| Tests       | Jest + ts-jest, driven by `solana-test-validator` (`./scripts/test.sh`). 97 integration cases + 320 unit tests across rust/keeper/api/sdk/app. |
 
 ## Prerequisites
 
@@ -50,7 +50,7 @@ pnpm install
 pnpm sdk:build                  # SDK → sdk/dist/
 
 # 3. Run integration tests (spawns its own validator)
-pnpm test                       # integration suite (96 tests, ~100 s)
+pnpm test                       # integration suite (97 tests, ~100 s)
 pnpm test:unit                  # all unit suites (keeper + api + sdk + app, ~6 s, no validator)
 pnpm test:all                   # both of the above, end-to-end
 
@@ -85,7 +85,7 @@ pnpm app:dev                    # Next.js admin + swap UI
 ├── app/                   # Next.js frontend (Wallet Adapter + RFQ + curve sim)
 ├── keeper/                # Deno oracle pusher
 ├── api/                   # Deno RFQ webhook (JupiterZ-compatible)
-├── tests/                 # Jest integration suite (96 cases)
+├── tests/                 # Jest integration suite (97 cases)
 ├── scripts/               # build / test / validator / measure-cu
 ├── docs/                  # SPEC + ARCH + OPS + CORE + DEPLOYMENT + INCIDENT_RESPONSE + PERFORMANCE
 └── CLAUDE.md              # AI-agent operating manual (read first)

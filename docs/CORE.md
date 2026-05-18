@@ -506,13 +506,15 @@ the protocol simply doesn't use it.
 
 | Topic | CORE.md (this doc) | SPEC | ARCH | OPS |
 |---|---|---|---|---|
-| Mode definition | §1.1 | — | §0.2 | §1 |
+| Mode definition | §1.1 | — | — | §1 |
 | Mode-transition rules | §1.2 | — | — | §1.1, §2 |
 | Keeper push loop | §1.3 | — | — | §4 |
 | Curve formula | §2 | §2.2 | — | — |
-| Curve parameters | §2.4 | §5 | — | — |
+| Price-source pipeline | §2.4 | §5 | — | §3.1 |
+| Curve parameters | §2.5 | §5 | — | — |
 | RFQ quote layout | §3.3 | §2.3 | — | — |
 | RFQ verification | §3.4 | §3.3 | — | — |
-| Quote lifecycle | §3.5 | §3.8 | — | §5.3 |
+| Quote lifecycle | §3.5 | §2.4, §3.8 | — | §5.3 |
 | Order flow | §4.1 | §3.3 | §3 | — |
-| Routing decision | §4.2 | §3.1 | — | §3.1 |
+| Routing decision | §4.2 | §3.3 | — | §3.1 |
+| 2-step admin rotation | §4.3 (threat table) | §3.9–§3.11, §2.5 | §4.2 | §13.2 |

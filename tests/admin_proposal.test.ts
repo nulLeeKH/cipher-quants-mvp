@@ -14,7 +14,7 @@ import {
 
 // ============================================================================
 // Admin-rotation 2-step flow (propose / accept / cancel)
-// docs/SPECIFICATION.md §3.7
+// docs/SPECIFICATION.md §3.9–§3.11
 //
 // Seed range 100–199 (per CLAUDE.md `Seed ID Ranges`).
 // Each test uses a freshly-created pool to avoid order dependence.
@@ -371,6 +371,78 @@ describe("propose_admin / accept_admin / cancel_admin_proposal", () => {
           .signers([targetAdmin])
           .rpc()
       ).rejects.toThrow(/ProposalStale/);
+    });
+
+    it("stale proposal can be cleaned up by the *new* current admin (post single-step rotate)", async () => {
+      // Edge case: if an outstanding proposal is orphaned by an intervening
+      // single-step rotation, the admin_proposal PDA is locked until someone
+      // calls cancel_admin_proposal. The original proposer no longer matches
+      // pool.admin (UnauthorizedAdmin), so cancel must succeed via the NEW
+      // current admin — otherwise the PDA would block all future propose_admin
+      // calls forever.
+      const fx = await setupPool(ctx, nextSeed());
+      const targetAdmin = Keypair.generate();
+      const intermediateAdmin = Keypair.generate();
+      await fundAccount(ctx.provider, intermediateAdmin.publicKey, 2);
+      const [adminProposal] = deriveAdminProposal(fx.poolState);
+
+      // 1. Original admin proposes targetAdmin.
+      await ctx.program.methods
+        .proposeAdmin(targetAdmin.publicKey)
+        .accountsPartial({
+          admin: fx.admin.publicKey,
+          poolState: fx.poolState,
+          adminProposal,
+        })
+        .signers([fx.admin])
+        .rpc();
+
+      // 2. Original admin rotates to intermediateAdmin via single-step. The
+      //    proposal is now stale.
+      await ctx.program.methods
+        .rotateAdmin(intermediateAdmin.publicKey)
+        .accountsPartial({
+          admin: fx.admin.publicKey,
+          poolState: fx.poolState,
+        })
+        .signers([fx.admin])
+        .rpc();
+
+      // 3. Original admin attempts cancel → UnauthorizedAdmin (no longer pool.admin).
+      await expect(
+        ctx.program.methods
+          .cancelAdminProposal()
+          .accountsPartial({
+            admin: fx.admin.publicKey,
+            poolState: fx.poolState,
+            adminProposal,
+          })
+          .signers([fx.admin])
+          .rpc()
+      ).rejects.toThrow(/UnauthorizedAdmin/);
+
+      // 4. New current admin (intermediateAdmin) cancels → success.
+      await ctx.program.methods
+        .cancelAdminProposal()
+        .accountsPartial({
+          admin: intermediateAdmin.publicKey,
+          poolState: fx.poolState,
+          adminProposal,
+        })
+        .signers([intermediateAdmin])
+        .rpc();
+
+      // 5. PDA is now free — fresh propose_admin from intermediateAdmin works.
+      const newTarget = Keypair.generate();
+      await ctx.program.methods
+        .proposeAdmin(newTarget.publicKey)
+        .accountsPartial({
+          admin: intermediateAdmin.publicKey,
+          poolState: fx.poolState,
+          adminProposal,
+        })
+        .signers([intermediateAdmin])
+        .rpc();
     });
   });
 

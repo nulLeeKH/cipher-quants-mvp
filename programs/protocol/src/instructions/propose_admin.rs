@@ -12,7 +12,7 @@ use crate::events::{emit_admin_proposal_created, AdminProposalCreated};
 use crate::safety::{verify_owner_program, verify_signer, verify_writable};
 use crate::state::{AdminRotationProposal, PoolState};
 
-// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 1 (propose).
+// docs/SPECIFICATION.md §3.9 — 2-step rotation, step 1 (propose).
 
 #[derive(BorshDeserialize)]
 pub struct ProposeAdminArgs {

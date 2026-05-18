@@ -45,7 +45,7 @@ assets. Not production — the output is research data, not a live product.
 - **C** RFQ Only: TTL=0, no push, market closed / low-vol
 
 ### Tech Stack (locked)
-- On-chain: Rust + **Pinocchio 0.11** (zero-dep Anza framework — replaces Anchor 0.32.1; rationale in [docs/ARCHITECTURE.md §0.1](docs/ARCHITECTURE.md)). SPL Token classic via `pinocchio-token`.
+- On-chain: Rust + **Pinocchio 0.11** (zero-dep Anza framework — replaces Anchor 0.32.1; see [docs/ARCHITECTURE.md §1](docs/ARCHITECTURE.md#1-system-overview) and the changelog at the bottom of [docs/SPECIFICATION.md](docs/SPECIFICATION.md)). SPL Token classic via `pinocchio-token`.
 - SDK: TypeScript (CommonJS) — hand-rolled Borsh codecs + Anchor-shaped `Program` shim on top of the 1-byte-tag + Borsh dispatch (drops `@coral-xyz/anchor` at runtime). Instruction builders, RFQ quote serialize/verify, ed25519 prepend, curve simulate.
 - Frontend: Next.js 14 + Solana Wallet Adapter — admin dashboard + user swap UI. **Mobile-first** (Tailwind responsive). English only. Wallet support: Phantom / Solflare / Backpack / **Ledger** / **Saga (Solana Mobile)** / Wallet Standard. Admin auth is a transaction-based challenge (Ledger-compatible, SIWS fallback).
 - Keeper: **Deno** — *oracle pusher only* (calls update_oracle while Mode A/B is active).
@@ -137,14 +137,14 @@ grep "consumed" .anchor/validator.log
 
 Spec v1 finalized → Pinocchio migration shipped → security audit closed →
 devnet-ready (DEPLOYMENT.md §1 all green) → comprehensive test coverage in
-place (416 tests across 6 runners: 26 Rust unit, 96 Jest integration, 129
+place (417 tests across 6 runners: 26 Rust unit, 97 Jest integration, 129
 keeper Deno, 37 API Deno, 64 SDK Jest, 64 app Jest). Next: actually deploy
 to devnet (Stage 2
 entry) and run the 4-week soak per DEPLOYMENT.md §10.
 
 ## ⚠️ Critical Rules
 
-- **Integration tests take ~100 s** (validator start → deploy → Jest 96 cases). Safe to run when the user is engaged; prefer `pnpm test:unit` (~3 s, no validator) for fast feedback during iteration. Always read `test_result.json` for structured failure output.
+- **Integration tests take ~100 s** (validator start → deploy → Jest 97 cases). Safe to run when the user is engaged; prefer `pnpm test:unit` (~3 s, no validator) for fast feedback during iteration. Always read `test_result.json` for structured failure output.
 - **DO NOT use `anchor test` / `anchor build`.** The project is Pinocchio. Use:
   - `./scripts/build.sh [label]` (BPF build — wraps `cargo build-sbf`; the `<label>` argument is informational only, same `.so` for every cluster)
   - `pnpm test` (integration: `scripts/test.sh` — cargo build-sbf → validator-up → jest → validator-down)
@@ -259,7 +259,7 @@ Invariants:
 
 ### On-Chain Math: Two Approaches
 
-This boilerplate provides **two math approaches**. Choose based on your protocol:
+The codebase carries **two math approaches** from the boilerplate template; the v0 protocol picks #1, and #2 is reserved for future work:
 
 #### 1. u128 Integer-Ratio Math (for AMM proportional calculations)
 

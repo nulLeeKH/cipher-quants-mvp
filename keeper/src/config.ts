@@ -82,15 +82,14 @@ export interface KeeperConfig {
   oracleModeAPriorityFeeMicrolamports: number;
   oracleModeBPriorityFeeMicrolamports: number;
 
-  // ----- RFQ webhook -----
-  /** HTTP server port (JupiterZ webhook) */
-  webhookPort: number;
-  /** Response-side quote TTL in slots; expirySlot = currentSlot + N. */
-  quoteValidWindowSlots: number;
-
   // ----- Misc -----
   verbose: boolean;
 }
+
+// NOTE: `WEBHOOK_PORT` and `QUOTE_VALID_WINDOW_SLOTS` used to live here
+// when the keeper bundled the RFQ webhook. Those env vars now belong to the
+// `api/` package (api/.env.example, api/src/config.ts). Don't re-add them
+// here unless the keeper actually serves an HTTP endpoint again.
 
 function envRequired(name: string): string {
   const v = Deno.env.get(name);
@@ -179,12 +178,6 @@ export function loadConfig(args: Record<string, unknown>): KeeperConfig {
     ),
     oracleModeBPriorityFeeMicrolamports: parseInt(
       envOptional("ORACLE_MODE_B_PRIORITY_FEE_MICROLAMPORTS", "5000"),
-      10
-    ),
-
-    webhookPort: parseInt(envOptional("WEBHOOK_PORT", "8080"), 10),
-    quoteValidWindowSlots: parseInt(
-      envOptional("QUOTE_VALID_WINDOW_SLOTS", "200"),
       10
     ),
 

@@ -11,7 +11,7 @@ use crate::safety::{
 };
 use crate::state::{AdminRotationProposal, PoolState};
 
-// docs/SPECIFICATION.md §3.7 — 2-step rotation, optional cancellation.
+// docs/SPECIFICATION.md §3.11 — 2-step rotation, optional cancellation.
 
 /// Accounts (positional):
 ///   0. admin           — signer, writable (rent destination)

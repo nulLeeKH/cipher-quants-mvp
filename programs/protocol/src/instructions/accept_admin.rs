@@ -11,7 +11,7 @@ use crate::safety::{
 };
 use crate::state::{AdminRotationProposal, PoolState};
 
-// docs/SPECIFICATION.md §3.7 — 2-step rotation, step 2 (accept).
+// docs/SPECIFICATION.md §3.10 — 2-step rotation, step 2 (accept).
 
 /// Accounts (positional):
 ///   0. new_admin       — signer, writable (rent destination)

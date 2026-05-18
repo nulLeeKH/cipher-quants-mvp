@@ -74,14 +74,26 @@ etc. (within the `MAX_TTL_SLOTS=8` cap).
 
 ## 3. Price Engine
 
-### 3.1 Inputs (PoC first choice; see [TODO.md §1](../TODO.md))
-- **Finnhub free + Yahoo unofficial** — primary price source (NBBO proxy via last trade ± synthetic spread).
-- **Pyth equities feed** — sanity / cross-check
-- **Raydium pool price** — basis extraction.
-- **(post-PoC) Backed Finance API** — inventory + redemption cost (pre Stage 3).
+### 3.1 Inputs (shipped + planned)
+
+**Shipped (devnet-ready):**
+- **`MockPriceSource`** — random walk + spike, dev/CI only.
+- **`PythPriceSource`** — Pyth Hermes (SSE default, polling fallback), free + no API key. Underlying-asset prices (NYSE equity, native crypto). See [keeper/src/sources/pyth.ts](../keeper/src/sources/pyth.ts).
+- **`BasisAdjustedSource`** wrapper — applies a signed-bps offset to bridge underlying → tokenized (xStocks etc.). See [keeper/src/sources/basis.ts](../keeper/src/sources/basis.ts).
+- **`FailoverPriceSource`** wrapper — multi-source priority + status-rank fallback. See [keeper/src/sources/failover.ts](../keeper/src/sources/failover.ts).
+
+**Planned (TODO.md §1, before Stage 2 → 3 exit):**
+- **Finnhub free + Yahoo unofficial** — second concrete adapter for Failover, NBBO proxy via last trade ± synthetic spread.
+- **Raydium pool price** — basis extraction for xStocks.
+- **(post-PoC) Backed Finance API** — inventory + redemption cost.
 - **Event calendar** — earnings, macro release times.
 
-> **Data-source abstraction is mandatory**: the price engine accepts inputs via a `PriceSource` trait/interface so concrete implementations (Finnhub / Polygon.io / Chainlink xStocks ...) can be swapped. This is the PoC decision that keeps migration open ([TODO.md §1.1](../TODO.md)).
+> **Data-source abstraction is the shipped baseline**: every source implements
+> the `PriceSource` interface ([keeper/src/sources/types.ts](../keeper/src/sources/types.ts))
+> with a `PriceTick` carrying `status: "fresh" | "stale" | "halted" | "unknown"`.
+> The worker refuses to push anything but `"fresh"` and auto-downgrades to
+> Mode C after 30 s of consecutive non-fresh ticks. Adding a new adapter is
+> a one-file change + factory branch ([keeper/src/sources/factory.ts](../keeper/src/sources/factory.ts)).
 
 ### 3.2 Outputs
 - `update_oracle` transaction payload (Mode A/B)
@@ -170,6 +182,7 @@ JupiterZ webhook spec:
 - `POST /swap`
 - `GET /tokens`
 - `GET /health` (liveness; outside the JupiterZ spec but useful operationally)
+- `GET /metrics` (Prometheus exposition; bearer-token-guarded by `METRICS_AUTH_TOKEN`; outside the JupiterZ spec — wired into the dashboards referenced in DEPLOYMENT.md §6 and INCIDENT_RESPONSE.md §0)
 
 ### 5.2 SLA
 - 250ms response
@@ -190,7 +203,14 @@ Basis: safety margin against the JupiterZ 95% fulfill rule + Hashflow MM's "5-se
 | Toxic-taker pattern detected                        | **Optional reject** | Decided after Stage 1 RQ1/RQ5 analysis                                                       |
 | **Rejection rate cap (safety net)**                 | —                 | 5-minute rolling rejection rate < **30%** (back-solved from JupiterZ 95% fulfill)              |
 
-> HTTP response: return `404 Not Found` within 250 ms (JupiterZ standard, no penalty).
+> HTTP response codes the API currently returns
+> ([api/src/server.ts](../api/src/server.ts)): `503` for "pool paused" or
+> "insufficient inventory"; `409 Conflict` for "curve is fresh, use direct
+> execute_swap"; `400` for malformed body or `inAmount ≤ 0`; `500` for
+> unhandled errors. **All rejections within 250 ms** to stay inside the
+> JupiterZ SLA. The exact JupiterZ-spec-mandated code for "no quote
+> available right now" is validated at Stage 2 entry via the
+> `jup-ag/rfq-webhook-toolkit` integration tests.
 
 ### 5.4 Run scope
 The RFQ webhook runs **24/7** (api/ HTTP server). In Mode A/B, users can *trade
@@ -200,8 +220,8 @@ in Mode C, but the api/ server keeps running.
 
 > If the webhook responds while the curve is fresh, users hit a *timing
 > conflict* (per §3.1 the quote is ignored and settlement uses the curve).
-> When the API server detects a fresh curve it returns `404` so the user is
-> guided to the *direct curve path*.
+> When the API server detects a fresh curve it returns `409 Conflict` so
+> the user is guided to the *direct curve path*.
 
 ---
 
@@ -557,8 +577,8 @@ framework works as-is in both.
 
 ### 13.3 Action items
 
-- [ ] Define the keeper's `RpcAdapter` interface + concrete Helius / QuickNode implementations.
-- [ ] Write `.env.example` (`ORACLE_KEY_PATH`, `RPC_URL`, `JITO_TIP_KEY`, ...).
+- [x] **Define the keeper's `RpcAdapter` interface** — shipped at [keeper/src/connection.ts](../keeper/src/connection.ts). Today only one concrete impl wraps `Connection` directly; concrete Helius/QuickNode adapters land when we actually switch providers (provider tag drives logging via `RPC_PROVIDER` env).
+- [x] **Write `.env.example`** — shipped for all three Deno/Node packages: [keeper/.env.example](../keeper/.env.example), [api/.env.example](../api/.env.example), [app/.env.example](../app/.env.example), plus production templates (`.env.production.example` in each). Actual vars: `ORACLE_WALLET_PATH` (not `ORACLE_KEY_PATH`), `RPC_URL`, `ORACLE_MODE_A_PRIORITY_FEE_MICROLAMPORTS` (instead of `JITO_TIP_KEY`; Jito tips are out of PoC scope, see §4.5).
 - [ ] Stand up the isolated host (LUKS recommended; at minimum SSH key-only).
 - [ ] Document the 3-tier split: oracle worker / pool admin / treasury (cold key on Ledger before Stage 2 entry).
 - [ ] (At mainnet entry) Plan migration to Turnkey or AWS KMS Ed25519.
@@ -654,34 +674,51 @@ Used as our own trading channel before / when JupiterZ registration is unavailab
 ### 14.6 Page / route layout
 
 ```
-app/
+app/src/
+├── middleware.ts                       # Edge-runtime admin JWT guard (/admin/*)
 ├── app/
-│   ├── page.tsx                  # Landing (brief intro + wallet connect)
+│   ├── layout.tsx                      # Root layout (providers)
+│   ├── page.tsx                        # Landing (intro + wallet connect)
 │   ├── swap/
-│   │   └── page.tsx              # User swap UI (§14.2). Mobile + desktop ready.
+│   │   └── page.tsx                    # User swap UI (§14.2). Mobile + desktop.
 │   ├── admin/
-│   │   ├── layout.tsx                  # JWT auth guard
-│   │   ├── login/page.tsx              # Transaction-based challenge sign-in (§14.4)
+│   │   ├── layout.tsx                  # Admin section layout
+│   │   ├── login/page.tsx              # signMessage / signTransaction challenge (§14.4)
 │   │   ├── page.tsx                    # Admin dashboard (§14.1)
-│   │   ├── pools/[pool]/page.tsx       # Per-pool detail
-│   │   ├── inventory/page.tsx          # Vault deposit guide + admin_withdraw_inventory UI
-│   │   └── actions/page.tsx            # pause / rotate / mode toggle (each action is a separate wallet tx)
+│   │   ├── inventory/page.tsx          # Deposit + admin_withdraw_inventory UI
+│   │   └── actions/page.tsx            # set_paused / rotate_oracle_signer / rotate_admin
+│   │                                   #   + 2-step propose/accept/cancel_admin_proposal
 │   └── api/
 │       ├── auth/
-│       │   ├── challenge/route.ts # POST: issue challenge
-│       │   └── verify/route.ts    # POST: verify the signed tx → JWT
-│       ├── metrics/route.ts       # Dashboard metrics (server-side RPC call results, formatted)
-│       └── history/route.ts       # Trade history (RPC `getSignaturesForAddress` + decode)
-├── components/                   # UI components (shadcn/ui)
-├── lib/
-│   ├── sdk.ts                    # @cipher-quants/sdk wrapper
-│   ├── rpc.ts                    # Helius Secure RPC client (Connection factory)
-│   ├── auth.ts                   # Admin auth (challenge signing + JWT lifecycle)
-│   └── decode.ts                 # Thin wrapper over SDK `parseEventsFromLogs`
-└── hooks/                        # React hooks (useWallet, usePoolState, etc.)
+│       │   ├── challenge/route.ts      # POST: issue challenge JWT
+│       │   ├── verify/route.ts         # POST: verify message OR Memo-tx signature → session JWT
+│       │   ├── me/route.ts             # GET: introspect current session
+│       │   └── logout/route.ts         # POST: clear session cookie
+│       └── history/route.ts            # GET: decoded event log via parseEventsFromLogs
+├── components/
+│   ├── ui/                             # shadcn/ui primitives (button/card/dialog/…)
+│   ├── nav/                            # Top nav
+│   ├── admin/                          # AdminGuard, AdminNav
+│   └── providers/                      # ThemeProvider, WalletContextProvider, ProgramProvider
+└── lib/
+    ├── utils.ts                        # cn / shortAddr / formatTokenAmount / parseDecimalAmount
+    ├── pool-config.ts                  # POOL_CONFIG + API_BASE_URL (env-driven)
+    ├── auth/
+    │   ├── jwt.ts                      # jose issue/verify (server-only)
+    │   ├── cookies.ts                  # session cookie set/clear/read
+    │   ├── message.ts                  # canonical challenge message format
+    │   └── session.ts                  # useAdminSession() hook (client)
+    └── hooks/
+        ├── usePoolState.ts             # PoolState polling
+        ├── useCurveFreshness.ts        # current-slot vs last_oracle_update_slot
+        └── useMintInfo.ts              # mint decimals (cached)
 ```
 
-> No `/api/rpc/route.ts` — the frontend's `lib/rpc.ts` `Connection` calls the Helius Secure RPC endpoint directly. Helius enforces domain / Origin ACL. If the ACL becomes insufficient or a custom-RPC option is needed, evolve by adding an API Gateway later.
+> Connection to Solana is created inline in providers/wallet.tsx (`ConnectionProvider`),
+> not via a separate `lib/rpc.ts`. The browser hits the Helius Secure RPC
+> endpoint directly via env var `NEXT_PUBLIC_RPC_URL`; Helius enforces
+> domain/Origin ACL. The Pinocchio-era SDK is imported via the workspace
+> alias `@cipher-quants/sdk`, no `lib/sdk.ts` indirection layer.
 
 ### 14.7 Locked decisions (applied during implementation)
 
@@ -699,6 +736,6 @@ Things to naturally pick up as we build:
 - **Friendly error messages for failed trades**: map on-chain errors to UI text (`NoFreshPriceSource` → "Try again in a moment", `SlippageExceeded` → "Adjust slippage tolerance", `QuoteExpired` → "Quote expired, request a new one").
 - **Oracle-push failure alert**: if the nonce stalls for 5 minutes, raise a red alert on the admin dashboard (Slack/Discord webhook later).
 - **Multi-pool comparison view**: when running multiple pools, the `/admin/page.tsx` lists per-pool volume, fill rate, mode, vault balance.
-- **Stale-state polling**: `usePoolState` hook polls every 2 seconds or subscribes via WebSocket (Helius `accountSubscribe`).
+- **Stale-state polling**: `usePoolState` hook polls every 4–8 s (page-specific; admin dashboard 4 s, inventory 6 s, actions 8 s). Future: switch to WebSocket via Helius `accountSubscribe`.
 - **Quote-expiry countdown**: on the user UI, show a progress bar based on `expiry_slot - current_slot` after a quote is received.
 - **Mode-transition history graph**: time series of mode changes (recharts or similar).

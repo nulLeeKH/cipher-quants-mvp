@@ -29,8 +29,6 @@ const ENV_KEYS = [
   "ORACLE_MODE_C_POLL_INTERVAL_MS",
   "ORACLE_MODE_A_PRIORITY_FEE_MICROLAMPORTS",
   "ORACLE_MODE_B_PRIORITY_FEE_MICROLAMPORTS",
-  "WEBHOOK_PORT",
-  "QUOTE_VALID_WINDOW_SLOTS",
   "VERBOSE",
 ];
 
@@ -66,8 +64,6 @@ Deno.test("loadConfig — minimal required (RPC_URL only) populates sensible def
   assertEquals(cfg.oracleModeCPollIntervalMs, 30_000);
   assertEquals(cfg.oracleModeAPriorityFeeMicrolamports, 50_000);
   assertEquals(cfg.oracleModeBPriorityFeeMicrolamports, 5_000);
-  assertEquals(cfg.webhookPort, 8080);
-  assertEquals(cfg.quoteValidWindowSlots, 200);
   assertEquals(cfg.verbose, false);
 });
 

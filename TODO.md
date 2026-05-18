@@ -41,7 +41,8 @@
 - SLA / uptime / cost negotiation
 
 ### 1.4 Action items
-- [ ] **Design the data-source abstraction layer** (price engine / keeper source-agnostic) — top priority
+- [x] **Design the data-source abstraction layer** (price engine / keeper source-agnostic) — **shipped**: `PriceSource` interface (`keeper/src/sources/types.ts`), `MockPriceSource` + `PythPriceSource` adapters, `FailoverPriceSource` + `BasisAdjustedSource` wrappers, env-driven `factory.ts`.
+- [ ] **Ship a second concrete adapter (Finnhub / Yahoo / CoinGecko)** so the Failover scaffold has someone to fall back to. Stage 2 exit gate.
 - [ ] Measure Finnhub free + Twelve Data free in practice (latency, drop rate, tick frequency)
 - [ ] Review the ToS grey area before relying on Yahoo unofficial
 - [ ] Decide where 12 months of historical data come from for the Stage 1 backtest
@@ -126,9 +127,8 @@
   - Capital $500k+ → **Squads multisig (2-of-3)** for treasury.
 
 #### Action items
-- [ ] Write `.env.example` (`ORACLE_KEY_PATH`, `RPC_URL`, `JITO_TIP_KEY`, ...).
+- [x] `.env.example` shipped for keeper / api / app with 3-tier wallet path separation (`ORACLE_WALLET_PATH` / `ADMIN_WALLET_PATH` / `FEE_PAYER_WALLET_PATH`) + priority-fee knobs (`ORACLE_MODE_A/B_PRIORITY_FEE_MICROLAMPORTS`).
 - [ ] Stand up an isolated VM (LUKS + SSH key-only + IP whitelist)
-- [ ] Decide on the 3-tier key directory layout (separate keypair files)
 - [ ] (Mainnet entry) PoC migration to Turnkey or AWS KMS Ed25519
 
 ---

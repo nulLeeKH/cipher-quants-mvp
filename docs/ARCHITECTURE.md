@@ -206,10 +206,12 @@ graph TD
 
 ```
 programs/protocol/src/
-├── lib.rs                       # 8 instruction entry points
+├── lib.rs                       # 11 instruction entry points (1-byte tag dispatch)
 ├── constants.rs                 # PDA seeds, MAX_TTL_SLOTS, MAX_SPREAD_BPS, SAFETY_BUFFER_SLOTS, PRICE_SCALE
-├── error.rs                     # Error codes (kept in sync with SPECIFICATION.md §4)
-├── events.rs                    # 8 events (SPECIFICATION.md §3.9)
+├── error.rs                     # 41 error codes (kept in sync with SPECIFICATION.md §4)
+├── events.rs                    # 10 events + manual base64 emit via sol_log_ (SPECIFICATION.md §3.12)
+├── safety/                      # Explicit verify_* helpers replacing Anchor's #[derive(Accounts)]
+│   └── mod.rs
 ├── instructions/
 │   ├── mod.rs
 │   ├── init_pool.rs
@@ -217,23 +219,28 @@ programs/protocol/src/
 │   ├── execute_swap.rs
 │   ├── set_paused.rs
 │   ├── rotate_oracle_signer.rs
-│   ├── rotate_admin.rs
+│   ├── rotate_admin.rs           # single-step (irreversible)
+│   ├── propose_admin.rs          # 2-step rotation, step 1
+│   ├── accept_admin.rs           # 2-step rotation, step 2
+│   ├── cancel_admin_proposal.rs  # 2-step rotation, abort
 │   ├── admin_withdraw_inventory.rs
 │   └── close_expired_nonce.rs
 ├── state/
-│   ├── mod.rs
-│   ├── pool.rs                  # PoolState struct (no reserves_*)
-│   └── quote_nonce_marker.rs    # QuoteNonceMarker struct
+│   ├── mod.rs                   # Discriminator tags 0x01–0x03
+│   ├── pool.rs                  # PoolState (no reserves_*; we read vault.amount)
+│   ├── quote.rs                 # SignedQuote ix-arg + 97-byte canonical message
+│   ├── quote_nonce_marker.rs    # QuoteNonceMarker (RFQ replay PDA)
+│   └── admin_proposal.rs        # AdminRotationProposal (2-step rotation PDA)
 └── math/
     ├── mod.rs
     ├── curve.rs                 # Linear-bps quote curve (fair_value + spread + depth + skew)
-    ├── signature.rs             # SignedQuote ed25519 verify
+    ├── signature.rs             # Instructions sysvar parser + ed25519 verify cross-check
     └── wad.rs                   # (currently unused; reserved for future dynamic-spread work)
 ```
 
-> Same module layout as the CLAUDE.md boilerplate. WAD is not part of the
-> primary v0 math model (prices are integer prices + bps spread composition),
-> but is kept for future rate-based extensions.
+> Module layout mirrors the breakdown in `CLAUDE.md`. WAD is not part of
+> the primary v0 math model (prices are integer prices + bps spread
+> composition) but is kept for future rate-based extensions.
 
 ---
 
@@ -281,12 +288,15 @@ programs/protocol/src/
 | `execute_swap` (RFQ fallback) | 42–85k CU | ed25519 verify + QuoteNonceMarker init + event |
 | `set_paused`                      | 5–7k CU        | Flag toggle + event                                              |
 | `rotate_oracle_signer`            | 5–7k CU        | Single-Pubkey update + event                                     |
-| `rotate_admin`                    | 5–7k CU        | Single-Pubkey update + event                                     |
+| `rotate_admin`                    | 5–7k CU        | Single-Pubkey update + event (single-step, irreversible)         |
+| `propose_admin`                   | 7–9k CU        | 2-step rotation step 1 — allocates AdminRotationProposal PDA      |
+| `accept_admin`                    | ~5.5k CU       | 2-step rotation step 2 — updates pool.admin + closes proposal     |
+| `cancel_admin_proposal`           | ~5k CU         | 2-step rotation abort — closes proposal, pool.admin unchanged     |
 | `admin_withdraw_inventory` | 15–28k CU | vault → admin ATA transfer + event |
 | `close_expired_nonce` | 5–12k CU | account close + event |
 
-> Each event-emit adds ~1–3k CU per instruction. Every instruction emits an
-> event ([SPECIFICATION.md §3.9](SPECIFICATION.md#39-events)).
+> Each event-emit adds ~1–3k CU per instruction. Every state-changing
+> instruction emits an event ([SPECIFICATION.md §3.12](SPECIFICATION.md#312-events)).
 
 Everything runs under the default 200k CU budget. Measurements come from
 `scripts/measure-cu.sh`, which subscribes to `solana logs <PROGRAM_ID>` while

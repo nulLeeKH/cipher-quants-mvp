@@ -44,27 +44,40 @@ engine's view.
 
 ```bash
 # From any machine with the admin key:
-solana --url <RPC_URL> program show <PROGRAM_ID>
+solana --url $RPC_URL program show <PROGRAM_ID>
 # Sanity-check the program ID matches; then build + send the set_paused ix.
-# Pinocchio has no `anchor run` analogue — call the SDK builder directly:
+# Pinocchio has no `anchor run` analogue — call the SDK builder directly.
+# Use the provider's sendAndConfirm: it sets recentBlockhash, signs via the
+# wallet, and waits for confirmation. Bypassing it with a raw
+# `Connection.sendTransaction(...)` will fail without an explicit blockhash.
 node -e '
-  const { Connection, Keypair, Transaction } = require("@solana/web3.js");
+  const { Connection, Keypair, Transaction, PublicKey } = require("@solana/web3.js");
   const sdk = require("@cipher-quants/sdk");
   (async () => {
     const conn = new Connection(process.env.RPC_URL, "confirmed");
-    const admin = Keypair.fromSecretKey(Uint8Array.from(require(process.env.ADMIN_WALLET_PATH)));
-    const ix = await sdk.createSetPausedIx(
-      new sdk.Program(new sdk.AnchorProvider(conn, new sdk.Wallet(admin))),
-      { admin: admin.publicKey, poolState: new sdk.PublicKey(process.env.POOL), paused: true },
+    const admin = Keypair.fromSecretKey(
+      Uint8Array.from(require(process.env.ADMIN_WALLET_PATH)),
     );
-    const sig = await conn.sendTransaction(new Transaction().add(ix), [admin]);
+    const provider = new sdk.AnchorProvider(conn, new sdk.Wallet(admin), {
+      commitment: "confirmed",
+      preflightCommitment: "confirmed",
+    });
+    const program = new sdk.Program(provider);
+    const ix = await sdk.createSetPausedIx(program, {
+      admin: admin.publicKey,
+      poolState: new PublicKey(process.env.POOL),
+      paused: true,
+    });
+    const sig = await provider.sendAndConfirm(new Transaction().add(ix));
     console.log("paused", sig);
   })();
 '
 ```
 
-(Or wire it into the `keeper` CLI as a subcommand; the instruction itself is
-in `programs/protocol/src/instructions/set_paused.rs`.)
+The same Node-one-liner pattern works for any admin op — swap
+`createSetPausedIx` for `createRotateOracleSignerIx` /
+`createAdminWithdrawInventoryIx` / etc. The instruction bodies live in
+`programs/protocol/src/instructions/`.
 
 **Verify**: fetch the pool, check `paused == true`. New `execute_swap` calls
 now reject with `PoolPaused (6203)`.
@@ -114,9 +127,10 @@ they can do that without pausing — proceed to step 2 immediately.
 
 ### Step 2 — Use the 2-step admin rotation
 
-The on-chain program supports `propose_admin` + `accept_admin` (see
-[SPECIFICATION.md §3.7](SPECIFICATION.md)). If the **legitimate admin still
-has the key**, propose a fresh admin under a Squads multisig you control:
+The on-chain program supports `propose_admin` + `accept_admin` +
+`cancel_admin_proposal` (see [SPECIFICATION.md §3.9–§3.11](SPECIFICATION.md#39-propose_admin-2-step-rotation-step-1)).
+If the **legitimate admin still has the key**, propose a fresh admin under
+a Squads multisig you control:
 
 1. Generate the new admin key (Ledger or Squads).
 2. From the compromised admin: `propose_admin(new_admin_pubkey)` — creates
@@ -142,7 +156,8 @@ justifies; user trades pulling far more than the curve should allow.
 
 ### Step 1 — Pause (under 60 seconds)
 
-As §2.1.
+Same as the oracle-compromise playbook (§2 Step 1) — `set_paused(true)` via
+the admin key, ASAP.
 
 ### Step 2 — Capture evidence
 
@@ -172,7 +187,9 @@ This step is the long pole. Until the bug is isolated, the pool stays paused.
 ## 5. Playbook: keeper not pushing (SEV-2)
 
 **Symptoms**: `last_oracle_update_slot` lags by 1+ minute while Mode is A/B;
-RFQ webhook returns `404 — curve fresh, use direct execute_swap` rarely.
+RFQ webhook returns `409 Conflict — Curve is fresh, use direct execute_swap`
+rarely (curve is staying stale → webhook can't tell the user "use the curve
+path" because the curve isn't fresh).
 
 ### Step 1 — Triage
 
@@ -226,14 +243,41 @@ SEV-1 (potential key compromise or duplicate writer).
 
 Cadence recommendation: every **90 days** in production.
 
+The `keeper` CLI has no admin subcommand — admin instructions are issued via
+the SDK from either the frontend admin UI ([app/admin/actions](../app/src/app/admin/actions/page.tsx),
+covers `rotate_oracle_signer`) or a Node.js one-liner using
+`createRotateOracleSignerIx`.
+
 ```bash
-# 1. Generate
+# 1. Generate the new signer
 solana-keygen new --outfile /tmp/oracle-next.json
 NEW_PK=$(solana address -k /tmp/oracle-next.json)
 
-# 2. Rotate on-chain (admin key)
-keeper admin rotate-oracle-signer --new-pubkey "$NEW_PK"   # via your admin script
-# OR build the instruction manually with sdk createRotateOracleSignerIx
+# 2. Rotate on-chain — pick ONE:
+#    (a) Open the admin UI → "Rotate oracle signer" card → paste $NEW_PK.
+#    (b) Or, for headless ops (same provider.sendAndConfirm pattern as §2 Step 1):
+NEW_PK=$NEW_PK node -e '
+  const { Connection, Keypair, Transaction, PublicKey } = require("@solana/web3.js");
+  const sdk = require("@cipher-quants/sdk");
+  (async () => {
+    const conn = new Connection(process.env.RPC_URL, "confirmed");
+    const admin = Keypair.fromSecretKey(
+      Uint8Array.from(require(process.env.ADMIN_WALLET_PATH)),
+    );
+    const provider = new sdk.AnchorProvider(conn, new sdk.Wallet(admin), {
+      commitment: "confirmed",
+      preflightCommitment: "confirmed",
+    });
+    const program = new sdk.Program(provider);
+    const ix = await sdk.createRotateOracleSignerIx(program, {
+      admin: admin.publicKey,
+      poolState: new PublicKey(process.env.POOL),
+      newAuthorizedOracleSigner: new PublicKey(process.env.NEW_PK),
+    });
+    const sig = await provider.sendAndConfirm(new Transaction().add(ix));
+    console.log("rotated", sig);
+  })();
+'
 
 # 3. Verify
 solana account <POOL_STATE_PUBKEY> --output json \
@@ -244,7 +288,7 @@ sudo install -m 600 /tmp/oracle-next.json /var/lib/cipher-quants/keys/oracle.jso
 systemctl restart cipher-quants-keeper
 
 # 5. Confirm first push happens within 1 min
-journalctl -u cipher-quants-keeper -f | grep "push success"
+journalctl -u cipher-quants-keeper -f | grep -i "push success\|nonce"
 
 # 6. Destroy the old key
 shred -u /var/lib/cipher-quants/keys/oracle.json.bak
@@ -252,24 +296,45 @@ shred -u /var/lib/cipher-quants/keys/oracle.json.bak
 
 ### 7.2 Admin key (planned handoff, e.g. moving to Squads multisig)
 
-Use the 2-step propose+accept flow:
+Use the 2-step propose+accept flow. Issued via the frontend admin UI
+([app/admin/actions](../app/src/app/admin/actions/page.tsx) — "Rotate admin
+— 2-step" card) or the SDK builders directly:
+
+```ts
+// From the CURRENT admin wallet:
+const ix = await createProposeAdminIx(program, {
+  admin: currentAdmin.publicKey,
+  poolState,
+  newAdmin: NEW_ADMIN_PUBKEY,
+});
+
+// Verify the proposal landed on-chain:
+const proposal = await program.account.adminRotationProposal.fetchNullable(
+  deriveAdminProposal(poolState)[0],
+);
+// proposal.newAdmin === NEW_ADMIN_PUBKEY
+
+// From the NEW admin wallet (after operator verification):
+const acceptIx = await createAcceptAdminIx(program, {
+  newAdmin: NEW_ADMIN_PUBKEY,
+  poolState,
+});
+```
+
+Verify:
 
 ```bash
-# From the CURRENT admin key:
-keeper admin propose-rotation --new-admin "<NEW_ADMIN_PUBKEY>"
-
-# Verify the proposal exists on-chain:
-solana account <ADMIN_PROPOSAL_PDA>   # exists after step above
-
-# From the NEW admin (after operator verification):
-keeper admin accept-rotation
-
-# Verify
 solana account <POOL_STATE_PUBKEY> --output json | jq -r '.admin'   # = NEW
 ```
 
-If the new admin never accepts, the proposal can be cancelled by the current
-admin via `cancel_admin_proposal` — no automatic timeout.
+If the new admin never accepts, the proposal can be cancelled by the
+current admin via `cancel_admin_proposal` — no automatic timeout. **Only
+the current admin can cancel** (the proposed new admin declines simply by
+not accepting). Tested edge case: if the current admin uses the
+irreversible single-step `rotate_admin` while a proposal is outstanding,
+the stale proposal cannot be accepted (`ProposalStale`) but can be cleaned
+up by the *new* current admin so the `admin_proposal` PDA doesn't lock
+([tests/admin_proposal.test.ts](../tests/admin_proposal.test.ts)).
 
 ### 7.3 Treasury key
 
