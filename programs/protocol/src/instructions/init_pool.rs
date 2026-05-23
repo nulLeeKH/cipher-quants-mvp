@@ -20,6 +20,10 @@ const SPL_TOKEN_ACCOUNT_LEN: u64 = 165;
 #[derive(BorshDeserialize)]
 pub struct InitPoolArgs {
     pub authorized_oracle_signer: Address,
+    /// Initial RFQ quote ed25519 signer. Must be non-zero. Can equal
+    /// `authorized_oracle_signer` (PoC default) — production should split.
+    /// Rotated independently via `rotate_quote_signer`.
+    pub authorized_quote_signer: Address,
     pub initial_fair_value: u64,
     pub initial_spread_bps: u16,
     pub initial_depth_params: DepthParams,
@@ -74,6 +78,9 @@ pub fn process(
     }
     if args.authorized_oracle_signer == Address::default() {
         return Err(ProtocolError::InvalidOracleSignerKey.into());
+    }
+    if args.authorized_quote_signer == Address::default() {
+        return Err(ProtocolError::InvalidQuoteSignerKey.into());
     }
     if args.initial_mode_ttl > MAX_TTL_SLOTS {
         return Err(ProtocolError::InvalidTtl.into());
@@ -213,6 +220,7 @@ pub fn process(
     let pool = PoolState {
         admin: admin_key,
         authorized_oracle_signer: args.authorized_oracle_signer,
+        authorized_quote_signer: args.authorized_quote_signer,
         base_mint,
         quote_mint,
         base_vault: base_vault_key,
@@ -228,7 +236,7 @@ pub fn process(
         base_vault_bump,
         quote_vault_bump,
         paused: 0,
-        _reserved: [0; 64],
+        _reserved: [0; 32],
     };
     pool.store_account_view(pool_info)?;
 
@@ -236,6 +244,7 @@ pub fn process(
         pool: pool_key,
         admin: admin_key,
         oracle_signer: args.authorized_oracle_signer,
+        quote_signer: args.authorized_quote_signer,
         base_mint,
         quote_mint,
         initial_fair_value: args.initial_fair_value,

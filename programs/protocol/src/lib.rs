@@ -60,6 +60,7 @@ pub enum InstructionTag {
     ProposeAdmin = 8,
     AcceptAdmin = 9,
     CancelAdminProposal = 10,
+    RotateQuoteSigner = 11,
 }
 
 // The dispatch table below matches on raw `u8` literals (Rust pattern arms
@@ -79,6 +80,7 @@ const _: () = {
     assert!(InstructionTag::ProposeAdmin as u8 == 8);
     assert!(InstructionTag::AcceptAdmin as u8 == 9);
     assert!(InstructionTag::CancelAdminProposal as u8 == 10);
+    assert!(InstructionTag::RotateQuoteSigner as u8 == 11);
 };
 
 // We are `no_std` for the on-chain target. The default `entrypoint!` macro
@@ -104,7 +106,7 @@ pinocchio::nostd_panic_handler!();
 /// Only used in the on-chain build; `cfg`-gated so the host (test) build
 /// doesn't warn on unused data.
 #[cfg(target_os = "solana")]
-static IX_LOG_LINES: [&[u8]; 11] = [
+static IX_LOG_LINES: [&[u8]; 12] = [
     b"Instruction: InitPool",
     b"Instruction: UpdateOracle",
     b"Instruction: ExecuteSwap",
@@ -116,6 +118,7 @@ static IX_LOG_LINES: [&[u8]; 11] = [
     b"Instruction: ProposeAdmin",
     b"Instruction: AcceptAdmin",
     b"Instruction: CancelAdminProposal",
+    b"Instruction: RotateQuoteSigner",
 ];
 
 pub fn process_instruction(
@@ -151,6 +154,7 @@ pub fn process_instruction(
         8 => instructions::propose_admin::process(program_id, accounts, ix_data),
         9 => instructions::accept_admin::process(program_id, accounts, ix_data),
         10 => instructions::cancel_admin_proposal::process(program_id, accounts, ix_data),
+        11 => instructions::rotate_quote_signer::process(program_id, accounts, ix_data),
         _ => Err(ProtocolError::UnknownInstruction.into()),
     }
 }

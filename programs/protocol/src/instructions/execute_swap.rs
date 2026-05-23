@@ -141,10 +141,13 @@ pub fn process(
             return Err(ProtocolError::QuoteExpired.into());
         }
 
+        // RFQ path is signed by the quote_signer hot key (api server),
+        // *not* the oracle_signer (keeper). Splitting these halves the
+        // blast radius of either box being compromised.
         verify_signed_quote_signature(
             instructions_sysvar_info,
             sq,
-            &pool.authorized_oracle_signer,
+            &pool.authorized_quote_signer,
         )?;
 
         // Replay guard: init the quote_nonce_marker PDA (`rest[0]`).

@@ -37,6 +37,24 @@ export async function createRotateOracleSignerIx(
 }
 
 // ============================================================================
+// rotate_quote_signer — SPECIFICATION §3.12
+// ============================================================================
+
+export async function createRotateQuoteSignerIx(
+  program: Program,
+  params: {
+    admin: PublicKey;
+    poolState: PublicKey;
+    newAuthorizedQuoteSigner: PublicKey;
+  }
+): Promise<TransactionInstruction> {
+  return program.methods
+    .rotateQuoteSigner(params.newAuthorizedQuoteSigner)
+    .accountsPartial({ admin: params.admin, poolState: params.poolState })
+    .instruction();
+}
+
+// ============================================================================
 // rotate_admin (single-step) — SPECIFICATION §3.7
 // ============================================================================
 

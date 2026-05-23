@@ -433,6 +433,8 @@ to §7 / §6 / §5 depending on layer.
 | Keeper push cadence (Mode A) | `[oracle] mode A cycle overshoot` warnings | < 5 % |
 | API `/quote` p95 latency | `/metrics` `cipher_quote_latency_ms{quantile="0.95"}` | ≤ 250 ms |
 | API `/quote` inventory fail rate | `cipher_quote_inventory_fail_total / cipher_quote_requests_total` | < 5 % |
+| API `/swap` last-look reject rate (combined) | `(cipher_swap_drift_reject_total + cipher_swap_inventory_reject_total + cipher_swap_curve_fresh_reject_total + cipher_swap_expired_reject_total + cipher_swap_paused_reject_total) / cipher_swap_requests_total` | < 5 % rolling 1 h (JupiterZ SLA) |
+| API `/swap` drift reject rate (Maker safety) | `cipher_swap_drift_reject_total / cipher_swap_requests_total` | < 2 %; tune `MM_MAX_DRIFT_BPS` if persistently above |
 | Cancel priority effectiveness | Manual: race a stale RFQ vs a same-slot `update_oracle`; expect SwapExecuted with `mode:0` | Documented in stage exit |
 | RPC error rate | Provider dashboard | < 0.5 % |
 

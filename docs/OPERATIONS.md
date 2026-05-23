@@ -177,12 +177,15 @@ Operational KPIs: number of triggers during Mode A uptime, avoided-loss / trigge
 > **Where it runs**: independent [api/](../api/) Deno HTTP server (Hono). *Separate* from the keeper — the keeper does write (oracle push) only, while the api server does read+sign (quote issuance) 24/7. Shares the oracle hot key (or can be split into a dedicated quote_signer).
 
 ### 5.1 Standard
-JupiterZ webhook spec:
-- `POST /quote`
-- `POST /swap`
-- `GET /tokens`
+JupiterZ webhook spec + Metis routing signal:
+- `POST /quote` — unsigned preview (returns `inAmount`, `outAmount`, `price`, `fairValueAtQuote`, `expirySlot`, `quoteId`). No `feeBps` field — MM revenue is the spread embedded in `price` vs `fairValueAtQuote`; consumers compute their own `(price - fair) * 10_000 / fair` if needed (correct under any future pricing strategy).
+- `POST /swap` — Maker last-look → returns `{tx, lastValidBlockHeight, components}` where `tx` is the JupiterZ-spec base64 `VersionedTransaction`
+- `GET /tokens` — `{address, symbol, decimals}` records, JupiterZ-shape
+- `GET /freshness` — Metis routing signal: `{fresh, ttl, ttlRemainingSlots, recommendedPath}` (see [INTEGRATIONS.md §2.3](INTEGRATIONS.md))
 - `GET /health` (liveness; outside the JupiterZ spec but useful operationally)
 - `GET /metrics` (Prometheus exposition; bearer-token-guarded by `METRICS_AUTH_TOKEN`; outside the JupiterZ spec — wired into the dashboards referenced in DEPLOYMENT.md §6 and INCIDENT_RESPONSE.md §0)
+
+Full router-integration guide for both JupiterZ and Metis: [INTEGRATIONS.md](INTEGRATIONS.md).
 
 ### 5.2 SLA
 - 250ms response
@@ -192,27 +195,60 @@ JupiterZ webhook spec:
 
 Basis: safety margin against the JupiterZ 95% fulfill rule + Hashflow MM's "5-second RV > 2σ" standard + 2-slot lookahead matching sniper detection lag.
 
-| Scenario                                            | Action            | Quantitative threshold                                                                       |
-|---|---|---|
-| Mode about to enter Active (oracle imminent fresh)  | **Reject**        | Lookahead 800 ms (2 slots). If the next push is scheduled within 800 ms, reject.              |
-| Volatility spike detected                           | **Reject**        | 5-second RV Z-score > +2.0                                                                    |
-| NBBO short-term jump                                | **Reject**        | NBBO 200 ms move > 12 bps (xStocks) / > 25 bps (long-tail crypto)                              |
-| Oracle confidence degraded                          | **Reject**        | Pyth confidence/price > 20 bps                                                                |
-| RPC latency degraded                                | **Reject**        | Measured quote-response roundtrip > 150 ms                                                     |
-| Inventory at limit                                  | **One-sided reject** | skew > 60% of cap                                                                          |
-| Toxic-taker pattern detected                        | **Optional reject** | Decided after Stage 1 RQ1/RQ5 analysis                                                       |
-| **Rejection rate cap (safety net)**                 | —                 | 5-minute rolling rejection rate < **30%** (back-solved from JupiterZ 95% fulfill)              |
+| Scenario                                            | Action            | Stage          | Quantitative threshold                                                                       |
+|---|---|---|---|
+| Pool paused                                         | **Reject**        | `/quote` + `/swap` | `503`                                                                                       |
+| Curve became / is fresh                             | **Reject**        | `/quote` + `/swap` | `409` (use direct curve path)                                                              |
+| Quote past `expiry_slot`                            | **Reject**        | `/swap` only       | `410 Gone`                                                                                  |
+| userPubkey mismatch (quote bound to other wallet)   | **Reject**        | `/swap` only       | `403`                                                                                       |
+| **Last-look — fair_value drift > `MM_MAX_DRIFT_BPS`** | **Reject**        | **`/swap` only**   | `409 PriceDrift`. Maker reject point. Default 50 bps. §5.4 below.                          |
+| Inventory underflow at quote / swap                 | **Reject**        | `/quote` + `/swap` | `503`                                                                                       |
+| Mode about to enter Active (oracle imminent fresh)  | **Reject**        | `/quote` (planned) | Lookahead 800 ms (2 slots). If next push scheduled within 800 ms, reject.                  |
+| Volatility spike detected                           | **Reject**        | `/quote` (planned) | 5-second RV Z-score > +2.0                                                                  |
+| NBBO short-term jump                                | **Reject**        | `/quote` (planned) | NBBO 200 ms move > 12 bps (xStocks) / > 25 bps (long-tail crypto)                            |
+| Oracle confidence degraded                          | **Reject**        | `/quote` (planned) | Pyth confidence/price > 20 bps                                                              |
+| RPC latency degraded                                | **Reject**        | `/quote` (planned) | Measured quote-response roundtrip > 150 ms                                                  |
+| Inventory at limit                                  | **One-sided reject** | `/quote` (planned) | skew > 60% of cap                                                                        |
+| Toxic-taker pattern detected                        | **Optional reject** | `/quote` (planned) | Decided after Stage 1 RQ1/RQ5 analysis                                                     |
+| **Rejection rate cap (safety net)**                 | —                 | both               | 5-minute rolling rejection rate < **30%** (back-solved from JupiterZ 95% fulfill)            |
 
 > HTTP response codes the API currently returns
 > ([api/src/server.ts](../api/src/server.ts)): `503` for "pool paused" or
 > "insufficient inventory"; `409 Conflict` for "curve is fresh, use direct
-> execute_swap"; `400` for malformed body or `inAmount ≤ 0`; `500` for
-> unhandled errors. **All rejections within 250 ms** to stay inside the
-> JupiterZ SLA. The exact JupiterZ-spec-mandated code for "no quote
-> available right now" is validated at Stage 2 entry via the
+> execute_swap" and for `/swap` last-look price drift; `410 Gone` for an
+> expired quote at `/swap`; `403` for `/swap` userPubkey mismatch; `400` for
+> malformed body or `inAmount ≤ 0`; `404` for unknown/expired quoteId at
+> `/swap`; `500` for unhandled errors. **All rejections within 250 ms** to
+> stay inside the JupiterZ SLA. The exact JupiterZ-spec-mandated code for
+> "no quote available right now" is validated at Stage 2 entry via the
 > `jup-ag/rfq-webhook-toolkit` integration tests.
 
-### 5.4 Run scope
+### 5.4 Last-look (Maker-side reject at `/swap`)
+
+JupiterZ flow: taker hits `/quote` (price preview), then `/swap` to redeem.
+The MM commits only at `/swap` by ed25519-signing the `SignedQuote`. The
+window between `/quote` and `/swap` is the **Maker's last-look** — at
+`/swap` time the API re-reads on-chain state and rejects if anything that
+mattered at `/quote` time has changed.
+
+Re-checks executed in order at `/swap`:
+
+1. `pool.paused` → `503`.
+2. `current_slot >= quote.expiry_slot` → `410 Gone`.
+3. Curve became fresh in interim → `409` (caller switches to curve path).
+4. `|fair_value_now − fair_value_at_quote| × 10_000 / fair_value_at_quote > MM_MAX_DRIFT_BPS` → `409 PriceDrift`.
+5. Vault output-side balance < quote `outAmount` → `503` (drained between quote and swap).
+6. All pass → ed25519-sign `SignedQuote`, return `{signedQuote, verifyIxBase64, quoteNonceMarker}`.
+
+A successful `/swap` consumes the cache entry (single-use). Nonces are
+not reusable — a second redemption attempt requires a fresh `/quote`.
+
+`MM_MAX_DRIFT_BPS` default is 50 (0.5%). Raise for highly volatile / wider-
+spread assets; lower for tight pairs. The 95% JupiterZ fill-rate SLA caps
+the combined reject rate at ~5%, so this threshold trades off MM safety
+against fill rate.
+
+### 5.5 Run scope
 The RFQ webhook runs **24/7** (api/ HTTP server). In Mode A/B, users can *trade
 directly via the curve*, so webhook calls are lower; the webhook is **the
 primary responder during Mode C** (market closed / weekends). The keeper sleeps

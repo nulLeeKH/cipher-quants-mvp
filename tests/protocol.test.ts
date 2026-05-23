@@ -92,6 +92,10 @@ describe("Protocol", () => {
   let ctx: TestContext;
   let admin: Keypair;
   let oracleSigner: Keypair;
+  // PoC same-key default — quoteSigner pubkey === oracleSigner pubkey so the
+  // legacy suite's RFQ signatures stay valid. The split's separation
+  // semantics are exercised by `quote_signer_split.test.ts`.
+  let quoteSigner: Keypair;
   let user: Keypair;
 
   // Sorted such that base < quote.
@@ -109,6 +113,7 @@ describe("Protocol", () => {
     ctx = await setupTestContext();
     admin = Keypair.generate();
     oracleSigner = Keypair.generate();
+    quoteSigner = oracleSigner; // same key for the legacy suite
     user = Keypair.generate();
 
     await Promise.all([
@@ -200,6 +205,7 @@ describe("Protocol", () => {
       await ctx.program.methods
         .initPool(
           oracleSigner.publicKey,
+          quoteSigner.publicKey,
           FAIR,
           SPREAD_BPS,
           defaultDepthParams(),
@@ -237,6 +243,7 @@ describe("Protocol", () => {
         ctx.program.methods
           .initPool(
             oracleSigner.publicKey,
+            quoteSigner.publicKey,
             FAIR,
             SPREAD_BPS,
             defaultDepthParams(),
@@ -275,6 +282,7 @@ describe("Protocol", () => {
         ctx.program.methods
           .initPool(
             oracleSigner.publicKey,
+            quoteSigner.publicKey,
             FAIR,
             SPREAD_BPS,
             defaultDepthParams(),
@@ -311,6 +319,7 @@ describe("Protocol", () => {
         ctx.program.methods
           .initPool(
             oracleSigner.publicKey,
+            quoteSigner.publicKey,
             new BN(0),
             SPREAD_BPS,
             defaultDepthParams(),
@@ -347,6 +356,7 @@ describe("Protocol", () => {
         ctx.program.methods
           .initPool(
             oracleSigner.publicKey,
+            quoteSigner.publicKey,
             FAIR,
             5000, // MAX_SPREAD_BPS = 1000
             defaultDepthParams(),
@@ -382,6 +392,7 @@ describe("Protocol", () => {
       const sig = await ctx.program.methods
         .initPool(
           oracleSigner.publicKey,
+          quoteSigner.publicKey,
           FAIR,
           SPREAD_BPS,
           defaultDepthParams(),
@@ -772,7 +783,7 @@ describe("Protocol", () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 9999n;
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: user.publicKey,
@@ -898,7 +909,7 @@ describe("Protocol", () => {
       const nonce = 1n;
 
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: user.publicKey,
@@ -950,7 +961,7 @@ describe("Protocol", () => {
       const nonce = 1001n;
       const fakeUser = Keypair.generate();
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: fakeUser.publicKey, // wrong user
@@ -986,7 +997,7 @@ describe("Protocol", () => {
       const nonce = 1003n;
       // quote is signed as sell but the instruction is buy
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: user.publicKey,
@@ -1027,7 +1038,7 @@ describe("Protocol", () => {
     it("rejects RFQ without ed25519 verify instruction prepended", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 1004n;
-      const { signedQuote } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+      const { signedQuote } = buildSignedQuoteWithVerifyIx(quoteSigner, {
         pool: poolState,
         user: user.publicKey,
         direction: "sell",
@@ -1101,7 +1112,7 @@ describe("Protocol", () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 1002n;
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: user.publicKey,
@@ -1135,7 +1146,7 @@ describe("Protocol", () => {
     it("rejects replay (same nonce)", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-        oracleSigner,
+        quoteSigner,
         {
           pool: poolState,
           user: user.publicKey,
@@ -1642,7 +1653,8 @@ describe("Protocol", () => {
       await expect(
         ctx.program.methods
           .initPool(
-            PublicKey.default, // zero pubkey
+            PublicKey.default, // zero oracle signer
+            quoteSigner.publicKey,
             FAIR,
             SPREAD_BPS,
             defaultDepthParams(),
@@ -1690,7 +1702,7 @@ describe("Protocol", () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 90_302n;
       const fakePool = Keypair.generate().publicKey;
-      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(quoteSigner, {
         pool: fakePool, // wrong pool
         user: user.publicKey,
         direction: "sell",
@@ -1727,7 +1739,7 @@ describe("Protocol", () => {
     it("execute_swap rejects quote.input_amount != instruction input_amount (QuoteSizeMismatch)", async () => {
       const slot = await ctx.provider.connection.getSlot();
       const nonce = 90_305n;
-      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(quoteSigner, {
         pool: poolState,
         user: user.publicKey,
         direction: "sell",
@@ -1769,7 +1781,7 @@ describe("Protocol", () => {
     it("execute_swap with a previously-used nonce errors QuoteAlreadyUsed", async () => {
       // Reuse nonce 1n which was consumed by the "Sell via signed quote" test.
       const slot = await ctx.provider.connection.getSlot();
-      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(oracleSigner, {
+      const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(quoteSigner, {
         pool: poolState,
         user: user.publicKey,
         direction: "sell",
@@ -1840,6 +1852,7 @@ describe("Protocol", () => {
       await ctx.program.methods
         .initPool(
           oracleSigner.publicKey,
+          quoteSigner.publicKey,
           FAIR,
           SPREAD_BPS,
           defaultDepthParams(),

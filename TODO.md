@@ -94,13 +94,22 @@
 - Reference implementation: [jup-ag/rfq-webhook-toolkit](https://github.com/jup-ag/rfq-webhook-toolkit) — Rust sample server + OpenAPI schema + integration tests
 
 ### 3.3 Dev-team action items
-- [ ] Review `jup-ag/rfq-webhook-toolkit` and run the local sample server (learn the interface)
-- [ ] Implement our RFQ webhook: `POST /quote`, `POST /swap`, `GET /tokens` all JupiterZ-spec compliant
-- [ ] OpenAPI schema validation: pass the integration tests in Jupiter's test suite
-- [ ] Lock the mapping between settlement-program `SignedQuote` ↔ Jupiter swap-tx payload
-- [ ] Verify `execute_swap` with the prepended ed25519 verify is compatible with the Jupiter swap-tx builder
+- [ ] Review `jup-ag/rfq-webhook-toolkit` and run the local sample server (learn the interface). Stage 2 entry task — shipped code shape already mirrors the toolkit; the open piece is running their tests against our api server (`pnpm api:dev` → point the toolkit's OpenAPI tests at `localhost:8080`).
+- [x] Implement our RFQ webhook: `POST /quote`, `POST /swap`, `GET /tokens`, `GET /freshness` — full surface in [INTEGRATIONS.md](docs/INTEGRATIONS.md).
+- [x] **Maker last-look at `/swap`**: ed25519 signing moved from `/quote` to `/swap`; drift/expiry/inventory recheck gates the signature. Default `MM_MAX_DRIFT_BPS=50`. See [OPERATIONS.md §5.4](docs/OPERATIONS.md).
+- [x] **`/swap` returns JupiterZ-spec `tx`** (base64 `VersionedTransaction` with CU-limit + idempotent ATA-create + verify + execute_swap). MM does not sign — user sole signer. `components` retained for callers that assemble their own tx shell.
+- [x] **`GET /freshness`** Metis routing signal (paused / fresh / ttl / recommended path).
+- [x] **`/tokens`** JupiterZ-shape `{address, symbol, decimals}` records.
+- [x] `SignedQuote` ↔ Jupiter swap-tx mapping locked: SignedQuote serialised inside `execute_swap_ix.data`; the ed25519 verify ix immediately precedes it; both wrapped in a `VersionedTransaction`. See [SPECIFICATION.md §3.3](docs/SPECIFICATION.md#33-execute_swap) + [INTEGRATIONS.md §2.2](docs/INTEGRATIONS.md).
+- [ ] **OpenAPI schema validation pass against `jup-ag/rfq-webhook-toolkit`**. Stage 2→3 gate. Tracked as a single hand-off — no further code is anticipated unless the toolkit surfaces a divergence.
 
-### 3.4 User action items (out of dev-team scope)
+### 3.4 Metis (Jupiter main router, curve-path integration)
+- [x] SDK exports for off-chain adapters (`simulateSwap`, `createExecuteSwapIx`, `fetchPoolState`, `derivePoolState`, `deriveVault`, `sortMints`).
+- [x] Routability signal: `GET /freshness` + same logic documented inline ([INTEGRATIONS.md §3.2](docs/INTEGRATIONS.md)).
+- [x] Adapter-author docs: [INTEGRATIONS.md §3](docs/INTEGRATIONS.md).
+- [ ] **Coordinate with Jupiter to write the Metis DEX adapter crate** (lives in their adapter SDK, not this repo). Hand them the INTEGRATIONS.md link + `@cipher-quants/sdk` npm package once published.
+
+### 3.5 User action items (out of dev-team scope)
 - [ ] Jupiter-side contact (Telegram/Discord)
 - [ ] Edge environment onboarding
 - [ ] Mainnet production registration

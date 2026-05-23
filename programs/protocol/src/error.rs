@@ -38,6 +38,7 @@ pub enum ProtocolError {
     InvalidOracleSignerKey = 6108,
     InvalidNewAdmin = 6109,
     ProposalStale = 6110,
+    InvalidQuoteSignerKey = 6111,
 
     // ----- 62xx authorization & state -----
     UnauthorizedOracle = 6200,

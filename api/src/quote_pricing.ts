@@ -41,10 +41,20 @@ export function computeQuotePricing(input: QuotePricingInput): QuotePricing {
   if (input.spreadBps < 0) {
     throw new Error("computeQuotePricing: spreadBps must be ≥ 0");
   }
-  // Match the on-chain integer convention exactly: half-spread truncates.
+  // Match the on-chain integer convention exactly: half-spread truncates
+  // (floor); for odd spread_bps the protocol takes spread-1 bps total per
+  // round-trip. Pool operators should set even spread_bps for exact symmetric
+  // take. See docs/SPECIFICATION.md §2.2 (Rounding rules).
   const half = BigInt(Math.floor(input.spreadBps / 2));
+  // Price rounding mirrors on-chain math/curve.rs::evaluate:
+  //   Buy  → CEIL (maximise price ⇒ minimise output base ⇒ favour protocol)
+  //   Sell → FLOOR (minimise price ⇒ minimise output quote ⇒ favour protocol)
+  // BigInt `/` truncates toward zero (= floor for positive); ceilDiv is the
+  // standard (num + denom - 1) / denom idiom for unsigned division.
+  const ceilDiv = (num: bigint, denom: bigint): bigint =>
+    (num + denom - 1n) / denom;
   const price = input.direction === "buy"
-    ? (input.fairValue * (10_000n + half)) / 10_000n
+    ? ceilDiv(input.fairValue * (10_000n + half), 10_000n)
     : (input.fairValue * (10_000n - half)) / 10_000n;
   if (price <= 0n) {
     throw new Error(

@@ -9,7 +9,12 @@ import {
   TransactionInstruction,
 } from "@solana/web3.js";
 import { BN } from "@cipher-quants/sdk";
-import { getAssociatedTokenAddressSync } from "@solana/spl-token";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from "@solana/spl-token";
 import { Buffer } from "buffer";
 import { ArrowDownUp, RefreshCw, ShieldAlert, Loader2 } from "lucide-react";
 
@@ -253,6 +258,30 @@ export default function SwapPage() {
         );
       }
 
+      // Idempotent ATA creates for first-time users. No-op when both ATAs
+      // already exist (~150 CU each); ~4 kCU each on first creation. Matches
+      // the api server's /swap tx layout so the curve path here, the legacy
+      // RFQ path below, and the JupiterZ-spec `tx` field all guarantee the
+      // user's ATAs exist before `execute_swap` touches them.
+      tx.add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          publicKey,
+          userBaseAta,
+          publicKey,
+          baseMint,
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        ),
+        createAssociatedTokenAccountIdempotentInstruction(
+          publicKey,
+          userQuoteAta,
+          publicKey,
+          quoteMint,
+          TOKEN_PROGRAM_ID,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        )
+      );
+
       if (freshness.isFresh) {
         // Curve path
         const ix = await createExecuteSwapIx(signingProgram, {
@@ -269,7 +298,11 @@ export default function SwapPage() {
         });
         tx.add(ix);
       } else {
-        // RFQ path — request signed quote from API server
+        // RFQ path — JupiterZ two-step:
+        //   1. POST /quote → price preview (NOT signed; MM has not committed)
+        //   2. POST /swap  → MM re-checks state (last-look) and signs only if
+        //                    the quote is still safe. The signed payload here
+        //                    is the MM's commitment.
         const inputMint = direction === "buy" ? quoteMint : baseMint;
         const outputMint = direction === "buy" ? baseMint : quoteMint;
         const quoteResp = await fetch(`${API_BASE_URL}/quote`, {
@@ -286,21 +319,41 @@ export default function SwapPage() {
           const errText = (await quoteResp.json().catch(() => ({})))?.error ?? quoteResp.statusText;
           throw new Error(`RFQ quote failed: ${errText}`);
         }
-        const q = await quoteResp.json();
+        const preview = await quoteResp.json();
 
-        const sq = q.signedQuote;
-
-        // Expiry check — the quote's expirySlot may already be in the past by
-        // the time we receive it (slow API round-trip, or immediately after a
-        // mode switch). Pre-rejecting on the client avoids burning the nonce +
-        // tx fee and prevents confusing on-chain errors for the user.
+        // Pre-flight expiry check — saves a /swap round-trip if the preview
+        // already shows the quote is stale.
         const currentSlot = await connection.getSlot("confirmed");
-        const quoteExpirySlot = Number(sq.expirySlot);
+        const quoteExpirySlot = Number(preview.expirySlot);
         if (Number.isFinite(quoteExpirySlot) && quoteExpirySlot <= currentSlot) {
           throw new Error(
             `Quote already expired (expiry=${quoteExpirySlot}, current=${currentSlot}). Try again.`
           );
         }
+
+        // Redeem the preview at /swap. The MM signs here, after last-look
+        // checks (drift, expiry, inventory). A 409/410/503 here means the
+        // MM rejected — the user should request a fresh /quote.
+        const swapResp = await fetch(`${API_BASE_URL}/swap`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            quoteId: preview.quoteId,
+            userPubkey: publicKey.toBase58(),
+          }),
+        });
+        if (!swapResp.ok) {
+          const errText = (await swapResp.json().catch(() => ({})))?.error ?? swapResp.statusText;
+          throw new Error(`Maker last-look rejected: ${errText}`);
+        }
+        const q = await swapResp.json();
+        // `/swap` returns both the JupiterZ-spec `tx` (base64 VersionedTx
+        // ready to sign + send) and an extra `components` block so callers
+        // that prefer to assemble their own legacy `Transaction` shell can.
+        // We stay on `components` here because the rest of this FE codepath
+        // already adds priority-fee ix into the legacy Transaction wrapper.
+        const sq = q.components.signedQuote;
+
         const signedQuote = {
           pool: new PublicKey(sq.pool),
           user: new PublicKey(sq.user),
@@ -313,14 +366,14 @@ export default function SwapPage() {
         };
 
         // Verify ix from base64
-        const verifyData = Uint8Array.from(atob(q.verifyIxBase64), (c) => c.charCodeAt(0));
+        const verifyData = Uint8Array.from(atob(q.components.verifyIxBase64), (c) => c.charCodeAt(0));
         const verifyIx = new TransactionInstruction({
           keys: [],
           programId: new PublicKey(ED25519_PROGRAM_ID),
           data: Buffer.from(verifyData),
         });
 
-        const quoteNonceMarker = new PublicKey(q.quoteNonceMarker);
+        const quoteNonceMarker = new PublicKey(q.components.quoteNonceMarker);
         const swapIx = await createExecuteSwapIx(signingProgram, {
           user: publicKey,
           poolState: poolAddress,

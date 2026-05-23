@@ -311,10 +311,18 @@ MAX_SKEW_OFFSET_BPS   = 500    (5 %)
 | **Keeper** | Mode A/B windows only | Pushes `update_oracle` (write) |
 | **API server** | 24/7 | Serves `/quote` + ed25519-signs (read + sign) |
 
-In PoC v0 both share the same oracle hot key. A future split introduces a
-dedicated `quote_signer`.
+Keys are split on-chain: `pool.authorized_oracle_signer` (keeper) is a
+distinct field from `pool.authorized_quote_signer` (api server). The two
+may share a keypair file for PoC convenience, but production sets
+`QUOTE_SIGNER_WALLET_PATH` to a separate keypair so a compromise of either
+hot box cannot leak the other's capability. Rotate independently via
+`rotate_oracle_signer` / `rotate_quote_signer`.
 
-### 3.2 `/quote` flow ([api/src/server.ts](../api/src/server.ts))
+### 3.2 `/quote` → `/swap` flow ([api/src/server.ts](../api/src/server.ts))
+
+JupiterZ two-step: `/quote` returns a **price preview only** (MM is **not**
+committed), and `/swap` is the MM's last-look point — the ed25519 signature
+is produced there, after re-checking on-chain state.
 
 ```
 POST /quote { inputMint, outputMint, inAmount, userPubkey }
@@ -336,14 +344,34 @@ POST /quote { inputMint, outputMint, inAmount, userPubkey }
  6. nonce = crypto.getRandomValues(8 bytes) → bigint LE
       (NOT Date.now()+Math.random(): same-ms collisions, attacker-predictable)
  7. expirySlot = currentSlot + QUOTE_VALID_WINDOW_SLOTS (default 200)
- 8. Serialise SignedQuoteMessage (97 bytes, Borsh) and build the ed25519
-    verify ix via Ed25519Program.createInstructionWithPrivateKey()
- 9. Pre-derive quoteNonceMarker PDA, include in the response
-10. Cache (quoteId → resp) — LRU 10 k entries, 5 min TTL
+ 8. Pre-derive quoteNonceMarker PDA
+ 9. Cache the *pending* quote (everything needed to sign later):
+    { quoteId, poolAddr, userPk, direction, inAmount, outAmount, price,
+      fairValueAtQuote, expirySlot, nonce, marker, expiresAtMs }
+    LRU 10 k entries, 5 min TTL
+10. Return preview only: { quoteId, inAmount, outAmount, price,
+    fairValueAtQuote, expirySlot } — NO ed25519 signature yet
 ```
 
-The response bundles `signedQuote`, `verifyIxBase64`, and `quoteNonceMarker`,
-so the frontend can drop them straight into a transaction.
+```
+POST /swap { quoteId, userPubkey }                ← Maker last-look gate
+
+ 1. cacheGet(quoteId) → 404 if unknown/expired
+ 2. userPubkey vs cached.userPk → 403 if mismatch
+ 3. fetchPoolState() (fresh)
+      - paused                            → 503
+      - currentSlot >= cached.expirySlot  → 410 Gone
+      - curve became fresh                → 409 (caller goes curve path)
+ 4. drift_bps = |fair_value_now - fairValueAtQuote| * 10_000 / fairValueAtQuote
+      drift_bps > MM_MAX_DRIFT_BPS        → 409 PriceDrift
+ 5. Vault output side < cached.outAmount  → 503 (drained since /quote)
+ 6. ed25519-sign now via buildSignedQuoteWithVerifyIx()
+ 7. Single-use: delete cache entry
+ 8. Return { signedQuote, verifyIxBase64, quoteNonceMarker, message }
+```
+
+The frontend drops `verifyIx` + `executeSwap(signedQuote, marker)` into one
+transaction. See OPS §5.4 for the full last-look rationale.
 
 ### 3.3 Signed-quote canonical layout (97 bytes)
 
@@ -391,15 +419,20 @@ init_quote_nonce_marker():
 ### 3.5 Quote lifecycle
 
 ```
-issued (API signed, in-memory cache) ─────► used  or  expired
-                                              │
-                                              ├─ used: quote_nonce_marker PDA persists
-                                              │  → close_expired_nonce can reclaim rent
-                                              │    (when expiry_slot + SAFETY_BUFFER_SLOTS < now)
-                                              │
-                                              └─ expired: rejected on-chain;
-                                                 API cache swept after 5 min TTL
+pending (cached, NOT signed) ──/swap last-look pass──► signed (one-shot)
+        │                                                  │
+        │  /swap reject (drift / paused / 410 / 503)        │  on-chain settle
+        ▼                                                  ▼
+   cache TTL evicts (5 min)                       quote_nonce_marker PDA persists
+                                                  → close_expired_nonce reclaims
+                                                    rent once
+                                                    expiry_slot + SAFETY_BUFFER_SLOTS < now
 ```
+
+Quote does **not** commit at `/quote`. MM commits at `/swap` only after the
+last-look checks pass. A pending cache entry can expire (TTL) or be rejected
+(last-look) without any nonce being burned — the `quote_nonce_marker` PDA is
+only created when the user actually submits `execute_swap` on-chain.
 
 `SAFETY_BUFFER_SLOTS` is 150 in production (~1 min) and 5 under the
 `test-feature` cfg.

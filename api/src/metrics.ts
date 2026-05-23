@@ -15,6 +15,19 @@ export interface Metrics {
   quoteInventoryFail: number;
   quoteOtherFail: number;
   swapRequests: number;
+  swapSuccess: number;
+  /** /swap last-look reject: fair_value drifted past MM_MAX_DRIFT_BPS. */
+  swapDriftReject: number;
+  /** /swap last-look reject: vault drained between /quote and /swap. */
+  swapInventoryReject: number;
+  /** /swap last-look reject: curve became fresh between /quote and /swap. */
+  swapCurveFreshReject: number;
+  /** /swap last-look reject: quote past expiry_slot. */
+  swapExpiredReject: number;
+  /** /swap reject: pool paused at swap time. */
+  swapPausedReject: number;
+  /** /swap reject: userPubkey mismatch / unknown quoteId / malformed. */
+  swapClientFail: number;
   latenciesMs: number[];
   latencyIdx: number;
 }
@@ -26,6 +39,13 @@ export function newMetrics(): Metrics {
     quoteInventoryFail: 0,
     quoteOtherFail: 0,
     swapRequests: 0,
+    swapSuccess: 0,
+    swapDriftReject: 0,
+    swapInventoryReject: 0,
+    swapCurveFreshReject: 0,
+    swapExpiredReject: 0,
+    swapPausedReject: 0,
+    swapClientFail: 0,
     latenciesMs: [],
     latencyIdx: 0,
   };
@@ -56,6 +76,13 @@ export function renderMetrics(m: Metrics): string {
     `cipher_quote_inventory_fail_total ${m.quoteInventoryFail}`,
     `cipher_quote_other_fail_total ${m.quoteOtherFail}`,
     `cipher_swap_requests_total ${m.swapRequests}`,
+    `cipher_swap_success_total ${m.swapSuccess}`,
+    `cipher_swap_drift_reject_total ${m.swapDriftReject}`,
+    `cipher_swap_inventory_reject_total ${m.swapInventoryReject}`,
+    `cipher_swap_curve_fresh_reject_total ${m.swapCurveFreshReject}`,
+    `cipher_swap_expired_reject_total ${m.swapExpiredReject}`,
+    `cipher_swap_paused_reject_total ${m.swapPausedReject}`,
+    `cipher_swap_client_fail_total ${m.swapClientFail}`,
     `# HELP cipher_quote_latency_ms /quote latency percentiles`,
     `# TYPE cipher_quote_latency_ms summary`,
     `cipher_quote_latency_ms{quantile="0.5"} ${percentile(sorted, 50)}`,

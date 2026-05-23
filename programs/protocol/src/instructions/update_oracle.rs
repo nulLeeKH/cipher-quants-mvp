@@ -1,4 +1,3 @@
-use borsh::BorshDeserialize;
 use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     AccountView, Address, ProgramResult,
@@ -7,33 +6,37 @@ use pinocchio::{
 use crate::constants::*;
 use crate::error::ProtocolError;
 use crate::events::{emit_oracle_updated, OracleUpdated};
-use crate::safety::{
-    verify_owner_program, verify_pda_with_bump, verify_signer, verify_writable,
-};
-use crate::state::{DepthParams, PoolState, SkewParams};
+use crate::safety::{verify_owner_program, verify_signer, verify_writable};
+use crate::state::{offset, PoolState};
 
 // docs/SPECIFICATION.md §3.2
+//
+// HOT PATH — the keeper calls this every 200ms in Mode A. Optimised for CU:
+//
+//   1. Manual ix-data parse (no Borsh decode of UpdateOracleArgs).
+//   2. Zero-copy PoolState access via `state::offset` constants — read just
+//      the 3 fields we gate on (authorized_oracle_signer, paused, oracle_nonce)
+//      and write the 7 fields we mutate. No full 323-byte deserialize +
+//      serialize round-trip.
+//   3. No `verify_pda_with_bump` — owner_program + discriminator check inside
+//      from-byte access already gate against attacker substitutions. Closed
+//      accounts get zeroed by Solana, failing the discriminator. Only
+//      `init_pool` can mint a fresh program-owned PoolState, and it derives
+//      the PDA itself with the canonical seeds.
+//
+// CU history: 5086 → ~1000 (~80% reduction). Event emit retained for FE +
+// indexer subscribers.
 
-#[derive(BorshDeserialize)]
-pub struct UpdateOracleArgs {
-    pub new_fair_value: u64,
-    pub new_spread_bps: u16,
-    pub new_depth_params: DepthParams,
-    pub new_skew_params: SkewParams,
-    pub new_nonce: u64,
-    pub new_ttl: u8,
-}
+const IX_DATA_LEN: usize = 8 + 2 + 20 + 16 + 8 + 1; // 55 bytes
 
-/// Accounts (positional):
-///   0. oracle_signer — signer
-///   1. pool_state    — writable, owned by this program
 pub fn process(
     _program_id: &Address,
     accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
-    let args = UpdateOracleArgs::try_from_slice(ix_data)
-        .map_err(|_| ProtocolError::InvalidInstructionData)?;
+    if ix_data.len() != IX_DATA_LEN {
+        return Err(ProtocolError::InvalidInstructionData.into());
+    }
 
     let [oracle_signer_info, pool_info, _rest @ ..] = accounts else {
         return Err(ProtocolError::NotEnoughAccountKeys.into());
@@ -43,61 +46,96 @@ pub fn process(
     verify_writable(pool_info)?;
     verify_owner_program(pool_info, &PROGRAM_ID)?;
 
-    let mut pool = PoolState::from_account_view(pool_info)?;
+    // ----- Parse ix data inline (no Borsh) -----
+    // Layout: [fair_value u64 LE | spread_bps u16 LE | depth(20) | skew(16) | nonce u64 LE | ttl u8]
+    let new_fair_value = u64::from_le_bytes(ix_data[0..8].try_into().unwrap());
+    let new_spread_bps = u16::from_le_bytes(ix_data[8..10].try_into().unwrap());
+    let depth_bytes: &[u8; 20] = ix_data[10..30].try_into().unwrap();
+    let skew_bytes: &[u8; 16] = ix_data[30..46].try_into().unwrap();
+    let new_nonce = u64::from_le_bytes(ix_data[46..54].try_into().unwrap());
+    let new_ttl = ix_data[54];
 
-    verify_pda_with_bump(
-        pool_info,
-        &[POOL_SEED, pool.base_mint.as_ref(), pool.quote_mint.as_ref()],
-        pool.bump,
-        &PROGRAM_ID,
-    )?;
-
-    if &pool.authorized_oracle_signer != oracle_signer_info.address() {
-        return Err(ProtocolError::UnauthorizedOracle.into());
-    }
-    if pool.paused != 0 {
-        return Err(ProtocolError::PoolPaused.into());
-    }
-    if args.new_nonce <= pool.oracle_nonce {
-        return Err(ProtocolError::NonceNotMonotonic.into());
-    }
-    if args.new_ttl > MAX_TTL_SLOTS {
-        return Err(ProtocolError::InvalidTtl.into());
-    }
-    if args.new_fair_value == 0 {
+    // ----- Validate args (do this before touching account data) -----
+    if new_fair_value == 0 {
         return Err(ProtocolError::InvalidFairValue.into());
     }
-    if args.new_spread_bps > MAX_SPREAD_BPS {
+    if new_spread_bps > MAX_SPREAD_BPS {
         return Err(ProtocolError::InvalidSpread.into());
     }
-    if args.new_depth_params.max_depth_bps > MAX_DEPTH_BPS
-        || args.new_depth_params.size_unit == 0
-    {
+    if new_ttl > MAX_TTL_SLOTS {
+        return Err(ProtocolError::InvalidTtl.into());
+    }
+    // DepthParams = depth_coef_bps:u32 (0..4) | size_unit:u64 (4..12) | max_depth_bps:u16 (12..14) | _reserved[6]
+    let depth_size_unit =
+        u64::from_le_bytes(depth_bytes[4..12].try_into().unwrap());
+    let depth_max_bps =
+        u16::from_le_bytes(depth_bytes[12..14].try_into().unwrap());
+    if depth_max_bps > MAX_DEPTH_BPS || depth_size_unit == 0 {
         return Err(ProtocolError::InvalidDepthParams.into());
     }
-    if args.new_skew_params.max_skew_offset_bps > MAX_SKEW_OFFSET_BPS
-        || (args.new_skew_params.target_base_bps as u64) > BPS_DENOMINATOR
-    {
+    // SkewParams = target_base_bps:u16 (0..2) | skew_coef_bps:u16 (2..4) | max_skew_offset_bps:u16 (4..6) | _reserved[10]
+    let skew_target = u16::from_le_bytes(skew_bytes[0..2].try_into().unwrap());
+    let skew_max_off = u16::from_le_bytes(skew_bytes[4..6].try_into().unwrap());
+    if skew_max_off > MAX_SKEW_OFFSET_BPS || (skew_target as u64) > BPS_DENOMINATOR {
         return Err(ProtocolError::InvalidSkewParams.into());
     }
 
     let slot = Clock::get()?.slot;
-    pool.fair_value = args.new_fair_value;
-    pool.spread_bps = args.new_spread_bps;
-    pool.depth_curve_params = args.new_depth_params;
-    pool.inventory_skew_params = args.new_skew_params;
-    pool.oracle_nonce = args.new_nonce;
-    pool.current_mode_ttl = args.new_ttl;
-    pool.last_oracle_update_slot = slot;
-    pool.store_account_view(pool_info)?;
+    let pool_key = *pool_info.address();
+    let signer_key = *oracle_signer_info.address();
+
+    // ----- Zero-copy state access -----
+    let mut data = pool_info.try_borrow_mut()?;
+
+    // Discriminator gate replaces the no-longer-called `from_account_view`.
+    if data.len() < PoolState::ACCOUNT_SIZE
+        || data[..offset::DISC_LEN] != PoolState::DISCRIMINATOR
+    {
+        return Err(ProtocolError::WrongDiscriminator.into());
+    }
+
+    // ---- 3 read-only gate checks ----
+    if data[offset::AUTHORIZED_ORACLE_SIGNER..offset::AUTHORIZED_ORACLE_SIGNER + 32]
+        != *signer_key.as_ref()
+    {
+        return Err(ProtocolError::UnauthorizedOracle.into());
+    }
+    if data[offset::PAUSED] != 0 {
+        return Err(ProtocolError::PoolPaused.into());
+    }
+    let current_nonce = u64::from_le_bytes(
+        data[offset::ORACLE_NONCE..offset::ORACLE_NONCE + 8]
+            .try_into()
+            .unwrap(),
+    );
+    if new_nonce <= current_nonce {
+        return Err(ProtocolError::NonceNotMonotonic.into());
+    }
+
+    // ---- 7 mutated-field writes ----
+    data[offset::FAIR_VALUE..offset::FAIR_VALUE + 8]
+        .copy_from_slice(&new_fair_value.to_le_bytes());
+    data[offset::SPREAD_BPS..offset::SPREAD_BPS + 2]
+        .copy_from_slice(&new_spread_bps.to_le_bytes());
+    data[offset::DEPTH_PARAMS..offset::DEPTH_PARAMS + 20].copy_from_slice(depth_bytes);
+    data[offset::SKEW_PARAMS..offset::SKEW_PARAMS + 16].copy_from_slice(skew_bytes);
+    data[offset::LAST_ORACLE_UPDATE_SLOT..offset::LAST_ORACLE_UPDATE_SLOT + 8]
+        .copy_from_slice(&slot.to_le_bytes());
+    data[offset::ORACLE_NONCE..offset::ORACLE_NONCE + 8]
+        .copy_from_slice(&new_nonce.to_le_bytes());
+    data[offset::CURRENT_MODE_TTL] = new_ttl;
+
+    drop(data); // release borrow before event emit (which may allocate)
 
     emit_oracle_updated(&OracleUpdated {
-        pool: *pool_info.address(),
-        oracle_signer: pool.authorized_oracle_signer,
-        new_fair_value: args.new_fair_value,
-        new_spread_bps: args.new_spread_bps,
-        new_nonce: args.new_nonce,
-        new_ttl: args.new_ttl,
+        pool: pool_key,
+        // signer_key was the gate-check pubkey, and we just confirmed
+        // data[AUTHORIZED_ORACLE_SIGNER] == signer_key.
+        oracle_signer: signer_key,
+        new_fair_value,
+        new_spread_bps,
+        new_nonce,
+        new_ttl,
         slot,
     });
 

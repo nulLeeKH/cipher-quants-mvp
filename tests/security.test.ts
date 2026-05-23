@@ -380,7 +380,7 @@ describe("security — close_expired_nonce substitution", () => {
     const currentSlot = await ctx.provider.connection.getSlot();
     const nonce = BigInt(Date.now()) + 9_999n;
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState,
         user: fx.user.publicKey,
@@ -573,6 +573,7 @@ describe("security — init_pool input validation (extra coverage)", () => {
     return ctx.program.methods
       .initPool(
         oracleSigner.publicKey,
+        oracleSigner.publicKey, // same-key default
         opts.fairValue ?? new BN(100_000_000),
         opts.spreadBps ?? 20,
         {
@@ -658,7 +659,7 @@ describe("security — execute_swap RFQ marker PDA", () => {
     const nonce = BigInt(Date.now()) + 29_999n;
     const wrongNonce = nonce + 1n;
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState,
         user: fx.user.publicKey,
@@ -704,7 +705,7 @@ describe("security — execute_swap RFQ marker PDA", () => {
     const currentSlot = await ctx.provider.connection.getSlot();
     const nonce = BigInt(Date.now()) + 39_999n;
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState, // quote is bound to fx.poolState
         user: fx.user.publicKey,
@@ -771,7 +772,7 @@ describe("security — discriminator integrity", () => {
     const currentSlot = await ctx.provider.connection.getSlot();
     const nonce = BigInt(Date.now()) + 19_999n;
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState,
         user: fx.user.publicKey,

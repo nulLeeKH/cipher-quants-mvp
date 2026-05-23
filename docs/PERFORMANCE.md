@@ -13,40 +13,21 @@
 
 | Instruction | Samples | Min | Mean | P95 | Max | Status |
 |---|---:|---:|---:|---:|---:|---|
-| AcceptAdmin | 3 | 5521 | 5521 | 5521 | 5521 | ✅ |
-| AdminWithdrawInventory | 4 | 10406 | 11828 | 10409 | 16092 | ✅ |
-| CancelAdminProposal | 2 | 5017 | 5017 | 5017 | 5017 | ✅ |
-| CloseExpiredNonce | 2 | 4463 | 4463 | 4463 | 4463 | ✅ |
-| ExecuteSwap | 11 | 18442 | 20704 | 23901 | 25401 | ✅ |
-| InitPool | 30 | 25327 | 30027 | 35827 | 37327 | ✅ |
-| ProposeAdmin | 11 | 7405 | 7814 | 8905 | 8905 | ✅ |
-| RotateAdmin | 3 | 4914 | 4914 | 4914 | 4914 | ✅ |
-| RotateOracleSigner | 2 | 5795 | 5795 | 5795 | 5795 | ✅ |
-| SetPaused | 7 | 3956 | 3956 | 3957 | 3957 | ✅ |
-| UpdateOracle | 11 | 4928 | 4928 | 4928 | 4928 | ✅ |
-
-## vs prior Anchor estimates
-
-Reference numbers are the Anchor-era estimates from `docs/ARCHITECTURE.md §8`
-(pre-migration). Pinocchio reduction = (anchor_mean - pinocchio_mean) /
-anchor_mean, where anchor_mean = midpoint of the original range.
-
-| Instruction | Anchor (range) | Pinocchio (mean) | Δ |
-|---|---:|---:|---:|
-| InitPool | 30000-35000 | 30027 | -7.6% |
-| UpdateOracle | 2000-6000 | 4928 | +23.2% |
-| ExecuteSwap | 32000-55000 | 20704 | -52.4% |
-| SetPaused | 5000-7000 | 3956 | -34.1% |
-| RotateOracleSigner | 5000-7000 | 5795 | -3.4% |
-| RotateAdmin | 5000-7000 | 4914 | -18.1% |
-| AdminWithdrawInventory | 15000-28000 | 11828 | -45.0% |
-| CloseExpiredNonce | 5000-12000 | 4463 | -47.5% |
-
-_propose_admin / accept_admin / cancel_admin_proposal were added in
-the Pinocchio era (2-step rotation) — no Anchor baseline._
+| AcceptAdmin | 3 | 5676 | 5676 | 5676 | 5676 | ✅ |
+| AdminWithdrawInventory | 4 | 10398 | 11820 | 10401 | 16084 | ✅ |
+| CancelAdminProposal | 3 | 5011 | 5011 | 5011 | 5011 | ✅ |
+| CloseExpiredNonce | 2 | 4455 | 4455 | 4455 | 4455 | ✅ |
+| ExecuteSwap | 12 | 18440 | 20343 | 22396 | 23896 | ✅ |
+| InitPool | 37 | 26482 | 30658 | 36982 | 41482 | ✅ |
+| ProposeAdmin | 13 | 7400 | 9362 | 11900 | 16400 | ✅ |
+| RotateAdmin | 4 | 5072 | 5072 | 5072 | 5072 | ✅ |
+| RotateOracleSigner | 2 | 5975 | 5975 | 5975 | 5975 | ✅ |
+| RotateQuoteSigner | 2 | 5976 | 5976 | 5976 | 5976 | ✅ |
+| SetPaused | 7 | 4113 | 4113 | 4114 | 4114 | ✅ |
+| UpdateOracle | 12 | 3107 | 3107 | 3107 | 3107 | ✅ |
 
 ## Raw sample count
 
-    86 consumed-line samples from .anchor/program-cu.log
+    101 consumed-line samples from .anchor/program-cu.log
 
-_Generated 2026-05-17T02:18:11Z_
+_Generated 2026-05-23T14:44:28Z_

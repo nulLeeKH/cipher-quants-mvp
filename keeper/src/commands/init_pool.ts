@@ -54,6 +54,13 @@ export async function runInitPool(
   const oracleProvider = new JsonFileKeypairProvider(config.oracleWalletPath);
   const admin = await adminProvider.getKeypair();
   const oracleSigner = await oracleProvider.getKeypair();
+  // Quote signer = separate hot key (api server). Falls back to oracle key
+  // when QUOTE_SIGNER_WALLET_PATH is unset (PoC single-key default). Production
+  // ops should set it to a distinct keypair so that an api-server compromise
+  // cannot also push update_oracle.
+  const quoteSigner = config.quoteSignerWalletPath
+    ? await new JsonFileKeypairProvider(config.quoteSignerWalletPath).getKeypair()
+    : oracleSigner;
 
   const [poolState] = sdkAccounts.derivePoolState(
     baseMint,
@@ -64,16 +71,30 @@ export async function runInitPool(
   const [quoteVault] = sdkAccounts.deriveVault(poolState, quoteMint, program.programId);
 
   console.log(bold(cyan("init-pool")));
-  console.log(dim(`  Admin:        ${admin.publicKey.toBase58()}`));
+  console.log(dim(`  Admin:         ${admin.publicKey.toBase58()}`));
   console.log(dim(`  Oracle signer: ${oracleSigner.publicKey.toBase58()}`));
-  console.log(dim(`  Base mint:    ${baseMint.toBase58()}`));
-  console.log(dim(`  Quote mint:   ${quoteMint.toBase58()}`));
-  console.log(dim(`  Pool PDA:     ${poolState.toBase58()}`));
+  // Reference equality covers the env-unset fallback; pubkey equality covers
+  // the explicit "QUOTE_SIGNER_WALLET_PATH=ORACLE_WALLET_PATH" case (two
+  // distinct Keypair objects loaded from the same file).
+  const sameKey =
+    quoteSigner === oracleSigner ||
+    quoteSigner.publicKey.equals(oracleSigner.publicKey);
+  console.log(
+    dim(
+      `  Quote signer:  ${quoteSigner.publicKey.toBase58()}${
+        sameKey ? " (same as oracle — PoC single-key)" : ""
+      }`
+    )
+  );
+  console.log(dim(`  Base mint:     ${baseMint.toBase58()}`));
+  console.log(dim(`  Quote mint:    ${quoteMint.toBase58()}`));
+  console.log(dim(`  Pool PDA:      ${poolState.toBase58()}`));
 
   try {
     const sig = await program.program.methods
       .initPool(
         oracleSigner.publicKey,
+        quoteSigner.publicKey,
         new BN(100_000_000), // initial_fair_value = $100 (PoC default — the worker overwrites via update_oracle)
         20,                  // spread 20 bps
         {

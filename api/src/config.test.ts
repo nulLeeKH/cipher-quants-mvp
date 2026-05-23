@@ -14,6 +14,11 @@ const ENV_KEYS = [
   "QUOTE_MINT",
   "API_PORT",
   "QUOTE_VALID_WINDOW_SLOTS",
+  "MM_MAX_DRIFT_BPS",
+  "BASE_SYMBOL",
+  "BASE_DECIMALS",
+  "QUOTE_SYMBOL",
+  "QUOTE_DECIMALS",
   "METRICS_AUTH_TOKEN",
   "VERBOSE",
 ];
@@ -42,8 +47,29 @@ Deno.test("loadConfig — minimal env (RPC_URL only) supplies defaults", () => {
   assertEquals(cfg.rpcProvider, "unknown");
   assertEquals(cfg.port, 8080);
   assertEquals(cfg.quoteValidWindowSlots, 200);
+  assertEquals(cfg.mmMaxDriftBps, 50); // 0.5% — JupiterZ last-look threshold
+  assertEquals(cfg.baseSymbol, "BASE");
+  assertEquals(cfg.baseDecimals, 6);
+  assertEquals(cfg.quoteSymbol, "QUOTE");
+  assertEquals(cfg.quoteDecimals, 6);
   assertEquals(cfg.verbose, false);
   assertEquals(cfg.metricsAuthToken, undefined); // fail-closed default
+});
+
+Deno.test("loadConfig — token metadata env overrides", () => {
+  const cfg = withEnv(
+    {
+      RPC_URL: "x",
+      BASE_SYMBOL: "xTSLA",
+      BASE_DECIMALS: "8",
+      QUOTE_SYMBOL: "USDC",
+      QUOTE_DECIMALS: "6",
+    },
+    () => loadConfig({}),
+  );
+  assertEquals(cfg.baseSymbol, "xTSLA");
+  assertEquals(cfg.baseDecimals, 8);
+  assertEquals(cfg.quoteSymbol, "USDC");
 });
 
 Deno.test("loadConfig — CLI arg overrides QUOTE_SIGNER_WALLET_PATH env", () => {
@@ -93,6 +119,14 @@ Deno.test("loadConfig — port and TTL overrides", () => {
   );
   assertEquals(cfg.port, 9090);
   assertEquals(cfg.quoteValidWindowSlots, 400);
+});
+
+Deno.test("loadConfig — MM_MAX_DRIFT_BPS override", () => {
+  const cfg = withEnv(
+    { RPC_URL: "x", MM_MAX_DRIFT_BPS: "120" },
+    () => loadConfig({}),
+  );
+  assertEquals(cfg.mmMaxDriftBps, 120);
 });
 
 Deno.test("loadConfig — verbose flips on env or CLI", () => {

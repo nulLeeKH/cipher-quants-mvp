@@ -6,15 +6,18 @@ use pinocchio::{
 
 use crate::constants::PROGRAM_ID;
 use crate::error::ProtocolError;
-use crate::events::{emit_oracle_signer_rotated, OracleSignerRotated};
+use crate::events::{emit_quote_signer_rotated, QuoteSignerRotated};
 use crate::safety::{verify_owner_program, verify_signer, verify_writable};
 use crate::state::PoolState;
 
-// docs/SPECIFICATION.md §3.5
+// docs/SPECIFICATION.md §3.12 — rotate the ed25519 signer used by the RFQ
+// path. Mirrors `rotate_oracle_signer` but writes the *quote* signer field
+// so the api-server hot key can be cycled without touching the keeper key
+// (and vice versa).
 
 #[derive(BorshDeserialize)]
-pub struct RotateOracleSignerArgs {
-    pub new_authorized_oracle_signer: Address,
+pub struct RotateQuoteSignerArgs {
+    pub new_authorized_quote_signer: Address,
 }
 
 /// Accounts (positional):
@@ -25,7 +28,7 @@ pub fn process(
     accounts: &mut [AccountView],
     ix_data: &[u8],
 ) -> ProgramResult {
-    let args = RotateOracleSignerArgs::try_from_slice(ix_data)
+    let args = RotateQuoteSignerArgs::try_from_slice(ix_data)
         .map_err(|_| ProtocolError::InvalidInstructionData)?;
 
     let [admin_info, pool_info, _rest @ ..] = accounts else {
@@ -41,24 +44,20 @@ pub fn process(
     if &pool.admin != admin_info.address() {
         return Err(ProtocolError::UnauthorizedAdmin.into());
     }
-    if args.new_authorized_oracle_signer == Address::default() {
-        // Mirrors init_pool's check + rotate_quote_signer. A zero-pubkey
-        // rotation would brick update_oracle (no signer can satisfy
-        // verify_signer against the zero address) and there's no recovery
-        // short of a second admin rotation.
-        return Err(ProtocolError::InvalidOracleSignerKey.into());
+    if args.new_authorized_quote_signer == Address::default() {
+        return Err(ProtocolError::InvalidQuoteSignerKey.into());
     }
 
-    let previous_signer = pool.authorized_oracle_signer;
-    pool.authorized_oracle_signer = args.new_authorized_oracle_signer;
+    let previous_signer = pool.authorized_quote_signer;
+    pool.authorized_quote_signer = args.new_authorized_quote_signer;
     pool.store_account_view(pool_info)?;
 
     let slot = Clock::get()?.slot;
-    emit_oracle_signer_rotated(&OracleSignerRotated {
+    emit_quote_signer_rotated(&QuoteSignerRotated {
         pool: *pool_info.address(),
         admin: *admin_info.address(),
         previous_signer,
-        new_signer: args.new_authorized_oracle_signer,
+        new_signer: args.new_authorized_quote_signer,
         slot,
     });
 

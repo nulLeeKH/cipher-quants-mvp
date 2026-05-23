@@ -16,5 +16,6 @@ pub mod init_pool;
 pub mod propose_admin;
 pub mod rotate_admin;
 pub mod rotate_oracle_signer;
+pub mod rotate_quote_signer;
 pub mod set_paused;
 pub mod update_oracle;

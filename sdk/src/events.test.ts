@@ -87,3 +87,104 @@ describe("parseEventsFromLogs", () => {
     expect(parseEventsFromLogs(["Program log: Instruction: InitPool"])).toEqual([]);
   });
 });
+
+// ============================================================================
+// quote_signer split — event coverage
+// ============================================================================
+
+import BN from "bn.js";
+
+function buildQuoteSignerRotatedBody(): Uint8Array {
+  const w = new Writer();
+  w.pubkey(new PublicKey(poolBytes(0x10))); // pool
+  w.pubkey(new PublicKey(poolBytes(0x11))); // admin
+  w.pubkey(new PublicKey(poolBytes(0x12))); // previousSigner
+  w.pubkey(new PublicKey(poolBytes(0x13))); // newSigner
+  w.u64(BigInt(987)); // slot
+  return w.finish();
+}
+
+function buildPoolInitializedBody(): Uint8Array {
+  const w = new Writer();
+  w.pubkey(new PublicKey(poolBytes(0x20))); // pool
+  w.pubkey(new PublicKey(poolBytes(0x21))); // admin
+  w.pubkey(new PublicKey(poolBytes(0x22))); // oracleSigner
+  w.pubkey(new PublicKey(poolBytes(0x23))); // quoteSigner — new field
+  w.pubkey(new PublicKey(poolBytes(0x24))); // baseMint
+  w.pubkey(new PublicKey(poolBytes(0x25))); // quoteMint
+  w.u64(new BN(100_000_000)); // initialFairValue
+  w.u16(20); // initialSpreadBps
+  w.u8(3); // initialModeTtl
+  w.u64(BigInt(111)); // slot
+  return w.finish();
+}
+
+describe("decodeEventLog — quote_signer split events", () => {
+  it("decodes QuoteSignerRotated (tag 0x0B)", () => {
+    const log = evtLog(0x0b, buildQuoteSignerRotatedBody());
+    const decoded = decodeEventLog(log);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.name).toBe("QuoteSignerRotated");
+    const data = decoded!.data as any;
+    expect(data.pool.toBase58()).toBe(new PublicKey(poolBytes(0x10)).toBase58());
+    expect(data.admin.toBase58()).toBe(new PublicKey(poolBytes(0x11)).toBase58());
+    expect(data.previousSigner.toBase58()).toBe(
+      new PublicKey(poolBytes(0x12)).toBase58()
+    );
+    expect(data.newSigner.toBase58()).toBe(
+      new PublicKey(poolBytes(0x13)).toBase58()
+    );
+    expect(data.slot.toString()).toBe("987");
+    expect(data.previousSigner.toBase58()).not.toBe(data.newSigner.toBase58());
+  });
+
+  it("decodes PoolInitialized with the new quoteSigner field", () => {
+    const log = evtLog(0x01, buildPoolInitializedBody());
+    const decoded = decodeEventLog(log);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.name).toBe("PoolInitialized");
+    const data = decoded!.data as any;
+    expect(data.oracleSigner.toBase58()).toBe(
+      new PublicKey(poolBytes(0x22)).toBase58()
+    );
+    expect(data.quoteSigner.toBase58()).toBe(
+      new PublicKey(poolBytes(0x23)).toBase58()
+    );
+    expect(data.quoteSigner.toBase58()).not.toBe(data.oracleSigner.toBase58());
+    expect(data.baseMint.toBase58()).toBe(
+      new PublicKey(poolBytes(0x24)).toBase58()
+    );
+  });
+});
+
+describe("decodeEventLog — sol_log_data format (modern path)", () => {
+  it("decodes `Program data: <base64>` (no EVT: prefix)", () => {
+    const body = buildPoolPausedChangedBody(true);
+    const payload = new Uint8Array(1 + body.length);
+    payload[0] = 0x04; // POOL_PAUSED_CHANGED
+    payload.set(body, 1);
+    const b64 = Buffer.from(payload).toString("base64");
+    const line = `Program data: ${b64}`;
+    const decoded = decodeEventLog(line);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.name).toBe("PoolPausedChanged");
+    expect((decoded!.data as any).paused).toBe(true);
+  });
+
+  it("Program data: with multiple space-separated blobs decodes the first", () => {
+    const body = buildPoolPausedChangedBody(false);
+    const payload = new Uint8Array(1 + body.length);
+    payload[0] = 0x04;
+    payload.set(body, 1);
+    const b64 = Buffer.from(payload).toString("base64");
+    // Simulate a sol_log_data call with two slices — runtime separates with " ".
+    const line = `Program data: ${b64} otherblob==`;
+    const decoded = decodeEventLog(line);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.name).toBe("PoolPausedChanged");
+  });
+
+  it("rejects garbage after the Program data: prefix", () => {
+    expect(decodeEventLog("Program data: !@#notbase64")).toBeNull();
+  });
+});

@@ -160,6 +160,11 @@ export interface PoolFixture {
   seedId: number;
   admin: web3.Keypair;
   oracleSigner: web3.Keypair;
+  /** RFQ ed25519 signer. ALWAYS a distinct Keypair from `oracleSigner` so
+   *  every test exercises the on-chain `authorized_quote_signer` ≠
+   *  `authorized_oracle_signer` separation. Set `opts.quoteSignerEqualsOracle=true`
+   *  only when a test specifically needs the legacy single-key behaviour. */
+  quoteSigner: web3.Keypair;
   user: web3.Keypair;
   baseMint: web3.PublicKey;
   quoteMint: web3.PublicKey;
@@ -180,6 +185,9 @@ export interface SetupPoolOpts {
   userSol?: number;
   decimals?: number;
   initialMintAmount?: bigint;
+  /** Force quoteSigner === oracleSigner (legacy single-key behaviour). Default
+   *  is a distinct fresh Keypair so every test exercises the split. */
+  quoteSignerEqualsOracle?: boolean;
 }
 
 export async function setupPool(
@@ -197,6 +205,9 @@ export async function setupPool(
 
   const admin = web3.Keypair.generate();
   const oracleSigner = web3.Keypair.generate();
+  const quoteSigner = opts.quoteSignerEqualsOracle
+    ? oracleSigner
+    : web3.Keypair.generate();
   const user = web3.Keypair.generate();
 
   await Promise.all([
@@ -231,6 +242,7 @@ export async function setupPool(
   await ctx.program.methods
     .initPool(
       oracleSigner.publicKey,
+      quoteSigner.publicKey,
       initialFairValue,
       initialSpreadBps,
       defaultDepthParams(),
@@ -255,6 +267,7 @@ export async function setupPool(
     seedId,
     admin,
     oracleSigner,
+    quoteSigner,
     user,
     baseMint,
     quoteMint,

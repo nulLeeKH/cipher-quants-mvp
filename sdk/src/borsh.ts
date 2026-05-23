@@ -209,7 +209,7 @@ function writeSkewParams(w: Writer, s: SkewParamsData): void {
 // the full 8 + 323.
 
 const POOL_STATE_BODY_BYTES = 323;
-const POOL_STATE_MIN_READABLE = 259; // bytes actually consumed by the decoder
+const POOL_STATE_MIN_READABLE = 291; // bytes actually consumed by the decoder
 
 export const POOL_STATE_DISCRIMINATOR: Uint8Array = new Uint8Array([
   0x01, 0, 0, 0, 0, 0, 0, 0,
@@ -218,6 +218,10 @@ export const POOL_STATE_DISCRIMINATOR: Uint8Array = new Uint8Array([
 export interface PoolStateData {
   admin: PublicKey;
   authorizedOracleSigner: PublicKey;
+  /** ed25519 signer used for RFQ quote messages. Separate hot key from
+   *  authorizedOracleSigner so a compromise of the api server doesn't leak
+   *  the on-chain push capability. Rotated via rotate_quote_signer. */
+  authorizedQuoteSigner: PublicKey;
   baseMint: PublicKey;
   quoteMint: PublicKey;
   baseVault: PublicKey;
@@ -257,6 +261,7 @@ export function decodePoolState(data: Uint8Array): PoolStateData {
   const r = new Reader(data.subarray(8));
   const admin = r.pubkey();
   const authorizedOracleSigner = r.pubkey();
+  const authorizedQuoteSigner = r.pubkey();
   const baseMint = r.pubkey();
   const quoteMint = r.pubkey();
   const baseVault = r.pubkey();
@@ -272,11 +277,12 @@ export function decodePoolState(data: Uint8Array): PoolStateData {
   const baseVaultBump = r.u8();
   const quoteVaultBump = r.u8();
   const pausedRaw = r.u8();
-  // _reserved[64] left unread.
+  // _reserved[32] left unread.
 
   return {
     admin,
     authorizedOracleSigner,
+    authorizedQuoteSigner,
     baseMint,
     quoteMint,
     baseVault,
@@ -390,9 +396,13 @@ export const INSTRUCTION_TAG_CLOSE_EXPIRED_NONCE = 7;
 export const INSTRUCTION_TAG_PROPOSE_ADMIN = 8;
 export const INSTRUCTION_TAG_ACCEPT_ADMIN = 9;
 export const INSTRUCTION_TAG_CANCEL_ADMIN_PROPOSAL = 10;
+export const INSTRUCTION_TAG_ROTATE_QUOTE_SIGNER = 11;
 
 export interface InitPoolArgs {
   authorizedOracleSigner: PublicKey;
+  /** RFQ ed25519 signer. Required. Set equal to `authorizedOracleSigner` for
+   *  the PoC same-key default; production should pass a distinct key. */
+  authorizedQuoteSigner: PublicKey;
   initialFairValue: BN;
   initialSpreadBps: number;
   initialDepthParams: DepthParamsData;
@@ -404,6 +414,7 @@ export function encodeInitPool(args: InitPoolArgs): Uint8Array {
   const w = new Writer();
   w.u8(INSTRUCTION_TAG_INIT_POOL);
   w.pubkey(args.authorizedOracleSigner);
+  w.pubkey(args.authorizedQuoteSigner);
   w.u64(args.initialFairValue);
   w.u16(args.initialSpreadBps);
   writeDepthParams(w, args.initialDepthParams);
@@ -537,4 +548,13 @@ export function encodeAcceptAdmin(): Uint8Array {
 
 export function encodeCancelAdminProposal(): Uint8Array {
   return new Writer().u8(INSTRUCTION_TAG_CANCEL_ADMIN_PROPOSAL).finish();
+}
+
+export function encodeRotateQuoteSigner(
+  newAuthorizedQuoteSigner: PublicKey
+): Uint8Array {
+  return new Writer()
+    .u8(INSTRUCTION_TAG_ROTATE_QUOTE_SIGNER)
+    .pubkey(newAuthorizedQuoteSigner)
+    .finish();
 }

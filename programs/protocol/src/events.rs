@@ -34,6 +34,7 @@ pub mod tag {
     pub const QUOTE_MARKER_CLOSED: u8 = 0x08;
     pub const ADMIN_PROPOSAL_CREATED: u8 = 0x09;
     pub const ADMIN_PROPOSAL_CANCELLED: u8 = 0x0A;
+    pub const QUOTE_SIGNER_ROTATED: u8 = 0x0B;
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
@@ -41,6 +42,8 @@ pub struct PoolInitialized {
     pub pool: Address,
     pub admin: Address,
     pub oracle_signer: Address,
+    /// Initial RFQ quote signer (`pool.authorized_quote_signer`).
+    pub quote_signer: Address,
     pub base_mint: Address,
     pub quote_mint: Address,
     pub initial_fair_value: u64,
@@ -134,54 +137,27 @@ pub struct AdminProposalCancelled {
     pub slot: u64,
 }
 
-// ============================================================================
-// Standard base64 encoder (RFC 4648 alphabet, no padding)
-// ============================================================================
-// We use the standard alphabet (`A-Za-z0-9+/`) instead of the URL-safe variant
-// so any general-purpose log indexer can decode the payload without extra
-// configuration. Cost on-chain: ~4 CU per byte; negligible vs the 200k budget.
-
-const BASE64_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-fn base64_encode_nopad(bytes: &[u8]) -> Vec<u8> {
-    let n_full = bytes.len() / 3;
-    let rem = bytes.len() - n_full * 3;
-    let mut out = Vec::with_capacity(n_full * 4 + if rem == 0 { 0 } else { rem + 1 });
-    let mut i = 0;
-    while i + 3 <= bytes.len() {
-        let n = ((bytes[i] as u32) << 16)
-            | ((bytes[i + 1] as u32) << 8)
-            | (bytes[i + 2] as u32);
-        out.push(BASE64_ALPHABET[((n >> 18) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[((n >> 12) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[((n >> 6) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[(n & 0x3F) as usize]);
-        i += 3;
-    }
-    if rem == 1 {
-        let n = (bytes[i] as u32) << 16;
-        out.push(BASE64_ALPHABET[((n >> 18) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[((n >> 12) & 0x3F) as usize]);
-    } else if rem == 2 {
-        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
-        out.push(BASE64_ALPHABET[((n >> 18) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[((n >> 12) & 0x3F) as usize]);
-        out.push(BASE64_ALPHABET[((n >> 6) & 0x3F) as usize]);
-    }
-    out
+#[derive(BorshSerialize, BorshDeserialize, Clone, Debug)]
+pub struct QuoteSignerRotated {
+    pub pool: Address,
+    pub admin: Address,
+    pub previous_signer: Address,
+    pub new_signer: Address,
+    pub slot: u64,
 }
 
 // ============================================================================
 // Emit helpers
 // ============================================================================
-// Each helper Borsh-serializes the body, prepends the 1-byte tag, base64-
-// encodes the result, and emits one `EVT:<base64>` log line. The on-chain
-// runtime prepends `Program log: ` automatically.
+// Each helper Borsh-serializes [tag || body] into one buffer and pushes it to
+// the runtime via `sol_log_data` — Solana's standard event channel. The
+// runtime base64-encodes inside the syscall (no client-side encoding cost)
+// and emits `Program data: <base64>` for indexers / SDK decoders to parse.
 //
-// We use a single heap buffer (Vec<u8>) and pass it to the raw `sol_log_`
-// syscall — avoids the fixed-size stack buffer that `pinocchio_log::log!`
-// uses, which would truncate larger events.
+// CU history: old path (Borsh + custom base64 + sol_log_ "EVT:<base64>") was
+// ~600–1500 CU per emit; sol_log_data is ~50–100 CU because the encoding is
+// paid for by the runtime, not the program. SDK decoder reads the
+// "Program data:" prefix instead of "Program log: EVT:".
 
 #[inline(always)]
 fn emit_event<T: BorshSerialize>(tag: u8, body: &T) {
@@ -190,30 +166,22 @@ fn emit_event<T: BorshSerialize>(tag: u8, body: &T) {
     if body.serialize(&mut payload).is_err() {
         return; // serialization is infallible for our types in practice
     }
-
-    let encoded = base64_encode_nopad(&payload);
-
-    let mut line = Vec::with_capacity(4 + encoded.len());
-    line.extend_from_slice(b"EVT:");
-    line.extend_from_slice(&encoded);
-
-    sol_log_bytes(&line);
+    log_data_one(&payload);
 }
 
-#[cfg(target_os = "solana")]
+/// Wrapper for `sol_log_data` with a single byte slice. Pinocchio 0.11 does
+/// not re-export a safe wrapper, so we construct the fat-pointer-array layout
+/// ourselves: `&[&[u8]] as *const u8` + the slice count as `len`.
 #[inline(always)]
-fn sol_log_bytes(line: &[u8]) {
-    // SAFETY: `line` is a valid byte slice; sol_log_ does not retain the
-    // pointer past the call.
+fn log_data_one(_bytes: &[u8]) {
+    #[cfg(target_os = "solana")]
     unsafe {
-        pinocchio::syscalls::sol_log_(line.as_ptr(), line.len() as u64);
+        let slices: [&[u8]; 1] = [_bytes];
+        pinocchio::syscalls::sol_log_data(
+            slices.as_ptr() as *const u8,
+            slices.len() as u64,
+        );
     }
-}
-
-#[cfg(not(target_os = "solana"))]
-#[inline(always)]
-fn sol_log_bytes(_line: &[u8]) {
-    // No-op on host builds — only the on-chain runtime has sol_log_.
 }
 
 pub fn emit_pool_initialized(e: &PoolInitialized) {
@@ -245,4 +213,7 @@ pub fn emit_admin_proposal_created(e: &AdminProposalCreated) {
 }
 pub fn emit_admin_proposal_cancelled(e: &AdminProposalCancelled) {
     emit_event(tag::ADMIN_PROPOSAL_CANCELLED, e);
+}
+pub fn emit_quote_signer_rotated(e: &QuoteSignerRotated) {
+    emit_event(tag::QUOTE_SIGNER_ROTATED, e);
 }

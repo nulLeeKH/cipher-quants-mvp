@@ -32,7 +32,7 @@ OUT=docs/PERFORMANCE.md
 # Whitelist of OUR instruction names — keeps SPL Token's
 # `Instruction: Transfer` / `Instruction: InitializeAccount3` CPI lines from
 # clobbering the most-recent-Instruction tracker mid-tx.
-OUR_IX_RE="^(InitPool|UpdateOracle|ExecuteSwap|SetPaused|RotateOracleSigner|RotateAdmin|AdminWithdrawInventory|CloseExpiredNonce|ProposeAdmin|AcceptAdmin|CancelAdminProposal)$"
+OUR_IX_RE="^(InitPool|UpdateOracle|ExecuteSwap|SetPaused|RotateOracleSigner|RotateAdmin|AdminWithdrawInventory|CloseExpiredNonce|ProposeAdmin|AcceptAdmin|CancelAdminProposal|RotateQuoteSigner)$"
 
 SKIP_TEST=false
 for arg in "$@"; do
@@ -171,80 +171,6 @@ awk -F'\t' '
     }
   }
 ' "$TMP" | sort >> "$OUT"
-
-echo "" >> "$OUT"
-echo "## vs prior Anchor estimates" >> "$OUT"
-echo "" >> "$OUT"
-echo "Reference numbers are the Anchor-era estimates from \`docs/ARCHITECTURE.md §8\`" >> "$OUT"
-echo "(pre-migration). Pinocchio reduction = (anchor_mean - pinocchio_mean) /" >> "$OUT"
-echo "anchor_mean, where anchor_mean = midpoint of the original range." >> "$OUT"
-echo "" >> "$OUT"
-echo "| Instruction | Anchor (range) | Pinocchio (mean) | Δ |" >> "$OUT"
-echo "|---|---:|---:|---:|" >> "$OUT"
-
-# Anchor estimates from ARCHITECTURE.md §8 — keep this list in sync with that table.
-awk -F'\t' -v anchor_init_pool="32500"           -v anchor_init_pool_range="30000-35000" \
-          -v anchor_update_oracle="4000"          -v anchor_update_oracle_range="2000-6000" \
-          -v anchor_execute_swap="43500"          -v anchor_execute_swap_range="32000-55000" \
-          -v anchor_set_paused="6000"             -v anchor_set_paused_range="5000-7000" \
-          -v anchor_rotate_oracle_signer="6000"   -v anchor_rotate_oracle_signer_range="5000-7000" \
-          -v anchor_rotate_admin="6000"           -v anchor_rotate_admin_range="5000-7000" \
-          -v anchor_admin_withdraw_inventory="21500" -v anchor_admin_withdraw_inventory_range="15000-28000" \
-          -v anchor_close_expired_nonce="8500"    -v anchor_close_expired_nonce_range="5000-12000" \
-          '
-  { vals[$1] = (vals[$1] == "" ? $2 : vals[$1] " " $2) }
-  END {
-    keys["InitPool"] = "init_pool"
-    keys["UpdateOracle"] = "update_oracle"
-    keys["ExecuteSwap"] = "execute_swap"
-    keys["SetPaused"] = "set_paused"
-    keys["RotateOracleSigner"] = "rotate_oracle_signer"
-    keys["RotateAdmin"] = "rotate_admin"
-    keys["AdminWithdrawInventory"] = "admin_withdraw_inventory"
-    keys["CloseExpiredNonce"] = "close_expired_nonce"
-
-    for (ix in keys) {
-      v = vals[ix]
-      if (v == "") continue
-      n = split(v, arr, " ")
-      sum = 0
-      for (i = 1; i <= n; i++) sum += arr[i]
-      mean = sum / n
-      anchor_mean_var = "anchor_" keys[ix]
-      anchor_range_var = "anchor_" keys[ix] "_range"
-      cmd = "echo $" anchor_mean_var
-      # We accessed the variable directly via awk -v above; reconstruct from arrays.
-    }
-    # Output rows in a fixed order.
-    order[1] = "InitPool"; ar[1] = anchor_init_pool; arange[1] = anchor_init_pool_range
-    order[2] = "UpdateOracle"; ar[2] = anchor_update_oracle; arange[2] = anchor_update_oracle_range
-    order[3] = "ExecuteSwap"; ar[3] = anchor_execute_swap; arange[3] = anchor_execute_swap_range
-    order[4] = "SetPaused"; ar[4] = anchor_set_paused; arange[4] = anchor_set_paused_range
-    order[5] = "RotateOracleSigner"; ar[5] = anchor_rotate_oracle_signer; arange[5] = anchor_rotate_oracle_signer_range
-    order[6] = "RotateAdmin"; ar[6] = anchor_rotate_admin; arange[6] = anchor_rotate_admin_range
-    order[7] = "AdminWithdrawInventory"; ar[7] = anchor_admin_withdraw_inventory; arange[7] = anchor_admin_withdraw_inventory_range
-    order[8] = "CloseExpiredNonce"; ar[8] = anchor_close_expired_nonce; arange[8] = anchor_close_expired_nonce_range
-
-    for (i = 1; i <= 8; i++) {
-      ix = order[i]
-      v = vals[ix]
-      if (v == "") {
-        printf "| %s | %s | (no samples) | — |\n", ix, arange[i]
-        continue
-      }
-      n = split(v, arr, " ")
-      sum = 0
-      for (j = 1; j <= n; j++) sum += arr[j]
-      mean = sum / n
-      delta = (mean - ar[i]) / ar[i] * 100.0
-      sign = delta >= 0 ? "+" : ""
-      printf "| %s | %s | %.0f | %s%.1f%% |\n", ix, arange[i], mean, sign, delta
-    }
-    print ""
-    print "_propose_admin / accept_admin / cancel_admin_proposal were added in"
-    print "the Pinocchio era (2-step rotation) — no Anchor baseline._"
-  }
-' "$TMP" >> "$OUT"
 
 echo "" >> "$OUT"
 echo "## Raw sample count" >> "$OUT"

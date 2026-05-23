@@ -18,7 +18,7 @@ adversarial-bot model, and stage gates live in [`docs/OPERATIONS.md`](docs/OPERA
 
 | Layer       | Stack                                                                                   |
 |-------------|-----------------------------------------------------------------------------------------|
-| On-chain    | Rust + **Pinocchio 0.11** (no Anchor runtime). 11 instructions, ~141 KB `.so`.          |
+| On-chain    | Rust + **Pinocchio 0.11** (no Anchor runtime). 12 instructions, ~141 KB `.so`.          |
 | SDK         | TypeScript (CommonJS). Hand-rolled Borsh codecs + Anchor-shaped `Program` shim — drops `@coral-xyz/anchor`. |
 | Frontend    | Next.js 14 + Solana Wallet Adapter. Mobile-first. Phantom / Solflare / Backpack / Ledger / Saga. |
 | Keeper      | Deno — oracle pusher (calls `update_oracle` while Mode A/B is active).                  |
@@ -71,7 +71,7 @@ pnpm app:dev                    # Next.js admin + swap UI
 
 ```
 .
-├── programs/protocol/     # Pinocchio on-chain program (11 instructions)
+├── programs/protocol/     # Pinocchio on-chain program (12 instructions)
 │   └── src/
 │       ├── lib.rs              # entrypoint + 1-byte-tag dispatch
 │       ├── constants.rs        # PDA seeds, well-known program ids, params

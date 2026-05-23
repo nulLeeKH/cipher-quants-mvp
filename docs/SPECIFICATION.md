@@ -55,7 +55,8 @@ instruction automatically.
 pub struct PoolState {
     // Authority
     pub admin: Pubkey,                       // Pool admin (init/pause/rotate)
-    pub authorized_oracle_signer: Pubkey,    // Single key allowed to call update_oracle
+    pub authorized_oracle_signer: Pubkey,    // Signer for update_oracle (keeper hot key)
+    pub authorized_quote_signer: Pubkey,     // Signer for RFQ ed25519 quotes (api server hot key)
 
     // Pair identifiers
     pub base_mint: Pubkey,
@@ -200,10 +201,20 @@ fn evaluate(
 }
 ```
 
-**Rounding (matches the CLAUDE.md rules; ExactIn):**
-- Buy: input is quote (fixed); output is base (user receives) → `base_out = input_amount × PRICE_SCALE / price`, **floor**.
-- Sell: input is base (fixed); output is quote (user receives) → `quote_out = input_amount × price / PRICE_SCALE`, **floor**.
-- Both cases floor the *amount the user receives* → protects the protocol (protocol pays less).
+**Rounding rules (every operation biased in the protocol's favour):**
+
+| Stage | Direction | Op | Rationale |
+|---|---|---|---|
+| `half_spread = spread_bps / 2` | Buy & Sell | FLOOR (integer truncation) | Odd `spread_bps` ⇒ protocol takes 1 bps less per round-trip. Pool operators set even `spread_bps` for exact symmetric take. |
+| `depth_bps`, `current_base_value`, `target_base_value` | — | FLOOR | Sub-1-bps precision noise. Cap-bounded by `MAX_DEPTH_BPS` / `MAX_SKEW_OFFSET_BPS`. |
+| `price = fair × bps_factor / 10_000` | **Buy** | **CEIL** | Output `base_out = input × PRICE_SCALE / price` → maximise price ⇒ minimise base paid. |
+| `price = fair × bps_factor / 10_000` | **Sell** | **FLOOR** | Output `quote_out = input × price / PRICE_SCALE` → minimise price ⇒ minimise quote paid. |
+| `output_amount` | Buy & Sell | FLOOR | Protocol pays the user no more than the rounded-down value. |
+| `driftBps = abs(now − then) × 10_000 / then` (off-chain `/swap` last-look) | — | CEIL | Stricter rejection: a real drift of `T+0.5` bps rejects against threshold `T`, not accepts. |
+
+Net per-swap bias: ≤ 1 PRICE_SCALE unit + ≤ 1 raw-token unit in the protocol's
+favour. Cumulative effect at v0 trade sizes is sub-1ppm of notional and
+absorbed by the spread.
 
 **CU estimate**: 4–6 u128 multiplies/divides + branches → ~5–8k CU. Comfortably inside `execute_swap`'s 30–60k CU budget.
 
@@ -262,7 +273,7 @@ pub struct SignedQuoteMessage {
 | Serialization         | **Borsh** (`borsh` 1.5, no length prefix on fixed arrays). Field order follows the struct declaration.                                                                                                                       |
 | Side enum encoding    | Borsh enum: 1 byte (Buy=0, Sell=1).                                                                                                                                                                                          |
 | Signature algorithm   | **Ed25519**.                                                                                                                                                                                                                  |
-| Signer key            | The ed25519 private key matching `pool_state.authorized_oracle_signer`.                                                                                                                                                       |
+| Signer key            | The ed25519 private key matching `pool_state.authorized_quote_signer` (api server hot key — separate from the oracle pusher).                                                                                                 |
 | Verification location | Solana's native `Ed25519SigVerify111111111111111111111111111` precompile (verify instruction prepended in the same transaction). `execute_swap` cross-checks the verify result + message + public key via the Instructions sysvar. |
 
 > SDK / RFQ webhook / on-chain verify code **must use the same serialization
@@ -334,7 +345,8 @@ pub struct AdminRotationProposal {
 
 | Name | Type | Description |
 |---|---|---|
-| `authorized_oracle_signer` | Pubkey      | The single key allowed to call update_oracle         |
+| `authorized_oracle_signer` | Pubkey      | Hot key allowed to call `update_oracle` (keeper)     |
+| `authorized_quote_signer`  | Pubkey      | Hot key whose ed25519 signature is required on RFQ quotes (api server). Must be non-zero. May equal `authorized_oracle_signer` for PoC; production should split. |
 | `initial_fair_value`       | u64         | Initial fair value                                   |
 | `initial_spread_bps`       | u16         | Initial spread (bps)                                 |
 | `initial_depth_params`     | DepthParams | Initial depth parameters                             |
@@ -467,7 +479,7 @@ pub struct AdminRotationProposal {
 **Pre-execution validations:**
 - `!pool_state.paused` → `PoolPaused`
 - `input_amount > 0` → `InvalidSize`
-- (RFQ path) An ed25519 verify instruction is prepended immediately before this one in the same transaction (verified via the Instructions sysvar), and that verify proves the canonical `SignedQuote` bytes were signed by `pool_state.authorized_oracle_signer` — must succeed.
+- (RFQ path) An ed25519 verify instruction is prepended immediately before this one in the same transaction (verified via the Instructions sysvar), and that verify proves the canonical `SignedQuote` bytes were signed by `pool_state.authorized_quote_signer` — must succeed.
 
 **Logic:**
 
@@ -794,10 +806,44 @@ simply not calling `accept_admin` (no positive action required to decline).
 
 ---
 
-### 3.12 Events
+### 3.12 `rotate_quote_signer` (admin)
+
+**Purpose:** Rotate `pool.authorized_quote_signer` — the ed25519 key whose
+signature the RFQ path verifies on every `SignedQuote`. Mirrors
+`rotate_oracle_signer` but writes the *quote* signer field so the api server
+hot key can be cycled without touching the keeper key. Splitting these two
+keys halves the blast radius if either box is compromised.
+
+**Parameters:**
+
+| Name | Type | Description |
+|---|---|---|
+| `new_authorized_quote_signer` | Pubkey | New ed25519 signer pubkey. Must be non-zero. |
+
+**Accounts:**
+
+| Account | Type | Mut | Signer | Description |
+|---|---|---|---|---|
+| `admin`      | Signer    | No  | Yes    | Must equal `pool_state.admin`. |
+| `pool_state` | PoolState | Yes | No     | `authorized_quote_signer` is overwritten. |
+
+**Validations:**
+- `admin.key() == pool_state.admin` → `UnauthorizedAdmin` (6201)
+- `new_authorized_quote_signer != 0` → `InvalidQuoteSignerKey` (6111)
+
+**Logic:** overwrite `pool.authorized_quote_signer`. Emit `QuoteSignerRotated
+{ pool, admin, previous_signer, new_signer, slot }`. RFQ quotes already in
+flight signed by the old key fail verification (`QuoteSignatureInvalid`).
+
+---
+
+### 3.13 Events
 
 Every state-changing instruction emits an event via the Pinocchio-era
-`emit_event` helper (`Program log: EVT:<base64(tag || borsh_body)>`). Used
+`emit_event` helper, which calls the `sol_log_data` syscall — runtime
+surfaces these as `Program data: <base64(tag || borsh_body)>` log lines
+(Solana's standard event channel; ~50–100 CU per emit, down from ~600 CU
+under the prior `sol_log_` + client-side base64 path). Used
 by the frontend history feature, keeper analytics, and external indexers.
 The SDK exposes a `decodeEventLog` / `parseEventsFromTx` API that strips
 the prefix, base64-decodes, and Borsh-deserializes the body into the
@@ -805,7 +851,7 @@ matching struct.
 
 | Event                  | Trigger                       | Key fields                                                                                                                                  |
 |------------------------|-------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| `PoolInitialized`         | `init_pool`                   | pool, admin, oracle_signer, base/quote mint, initial_fair_value, initial_spread_bps, initial_mode_ttl, slot                                  |
+| `PoolInitialized`         | `init_pool`                   | pool, admin, oracle_signer, quote_signer, base/quote mint, initial_fair_value, initial_spread_bps, initial_mode_ttl, slot                    |
 | `OracleUpdated`           | `update_oracle`               | pool, oracle_signer, new_fair_value, new_spread_bps, new_nonce, new_ttl, slot                                                                |
 | `SwapExecuted`            | `execute_swap`                | pool, user, direction (0/1), **mode (0=curve, 1=rfq)**, input_amount, output_amount, **execution_price**, quote_nonce (RFQ only), slot       |
 | `PoolPausedChanged`       | `set_paused`                  | pool, admin, paused, slot                                                                                                                    |
@@ -815,6 +861,7 @@ matching struct.
 | `QuoteMarkerClosed`       | `close_expired_nonce`         | pool, closer, nonce, expiry_slot, slot                                                                                                       |
 | `AdminProposalCreated`    | `propose_admin`               | pool, proposed_by, new_admin, slot                                                                                                          |
 | `AdminProposalCancelled`  | `cancel_admin_proposal`       | pool, admin, cancelled_new_admin, slot                                                                                                       |
+| `QuoteSignerRotated`      | `rotate_quote_signer`         | pool, admin, previous_signer, new_signer, slot                                                                                               |
 
 > **Side enum flattening**: inside events, `direction` is a u8 (0=Buy, 1=Sell)
 > — better for IDL enum compatibility and indexer ergonomics. Instruction
@@ -848,6 +895,7 @@ matching struct.
 | 6108 | InvalidOracleSignerKey  | authorized_oracle_signer == 0                             |
 | 6109 | InvalidNewAdmin         | proposed new_admin is zero / equals current admin / proposal already exists |
 | 6110 | ProposalStale           | `accept_admin` rejected because admin changed since the proposal was created |
+| 6111 | InvalidQuoteSignerKey   | authorized_quote_signer == 0 (init_pool / rotate_quote_signer)              |
 | 6200 | UnauthorizedOracle      | Oracle signer mismatch                                   |
 | 6201 | UnauthorizedAdmin       | Admin mismatch                                           |
 | 6202 | NonceNotMonotonic       | new_nonce <= current nonce                               |
@@ -932,7 +980,7 @@ The Pinocchio-era SDK ships an Anchor-shaped `Program` shim on top of the
 parallel surfaces are exposed:
 
 **Surface A — `program.methods.X(args).accountsPartial(...).rpc()`** (Anchor
-parity, for existing call sites). Available for all 11 instructions.
+parity, for existing call sites). Available for all 12 instructions.
 
 **Surface B — raw builders that return `TransactionInstruction`** (composable
 for multi-ix transactions, prepended ed25519, ComputeBudget priority fee,
@@ -945,6 +993,7 @@ etc.). Live in `sdk/src/instructions/`:
 | `createExecuteSwapIx`                   | `(program, params) → TransactionInstruction` — `params.signedQuote ?? null` decides curve vs RFQ path |
 | `createSetPausedIx`                     | `(program, {admin, poolState, paused}) → TransactionInstruction` |
 | `createRotateOracleSignerIx`            | `(program, {admin, poolState, newAuthorizedOracleSigner}) → TransactionInstruction` |
+| `createRotateQuoteSignerIx`             | `(program, {admin, poolState, newAuthorizedQuoteSigner}) → TransactionInstruction` |
 | `createRotateAdminIx`                   | `(program, {admin, poolState, newAdmin}) → TransactionInstruction` (single-step) |
 | `createProposeAdminIx`                  | `(program, {admin, poolState, newAdmin}) → TransactionInstruction` (2-step start) |
 | `createAcceptAdminIx`                   | `(program, {newAdmin, poolState}) → TransactionInstruction` (2-step finish) |
@@ -982,6 +1031,8 @@ JSON response containing a `signedQuote` + the base64-encoded ed25519
 
 | Version | Date       | Change |
 |---|---|---|
+| v0.5    | 2026-05-23 | **CU optimisations + rounding & integration audit.** (1) `update_oracle` 5086 → 3107 CU (~39%): dropped `verify_pda_with_bump` (owner + discriminator already gate), zero-copy field access via new `state::offset` byte-offset constants (no full Borsh deserialise/serialise of the 323-byte body), manual ix-arg parse (no Borsh decode of UpdateOracleArgs). (2) Event emit switched from `sol_log_` + client-side base64 to `sol_log_data` syscall → runtime-side base64, "`Program data:`" channel, ~10× cheaper per emit. SDK decoder accepts both new and legacy formats. (3) Math rounding tightened to always favour protocol: Buy `price` now CEIL (mirror Sell already FLOOR); off-chain `/swap` `driftBps` CEIL (stricter reject). (4) `rotate_oracle_signer` gains zero-key guard (mirror `rotate_quote_signer` + `init_pool`). (5) Token-metadata env (`BASE_SYMBOL/DECIMALS`, `QUOTE_SYMBOL/DECIMALS`) — hardcoded `6/BASE` removed. (6) FE swap UI adds idempotent ATA-create ix. (7) New `state::offset` parity test, +9 new SDK/api unit tests. |
+| v0.4    | 2026-05-23 | **Quote-signer / oracle-signer split.** (1) PoolState gains `authorized_quote_signer: Pubkey` (rfq ed25519 signer; api server hot key). `_reserved` shrunk 64→32 — total `SIZE` unchanged at 323 bytes. (2) `execute_swap` RFQ path verifies the ed25519 ix against `authorized_quote_signer` instead of `authorized_oracle_signer`. (3) `init_pool` takes both signer pubkeys; both must be non-zero (`InvalidQuoteSignerKey = 6111`). (4) New instruction `rotate_quote_signer` (§3.12) — admin-only, mirrors `rotate_oracle_signer`. Tag 11. (5) New event `QuoteSignerRotated` (event tag `0x0B`). `PoolInitialized` gains `quote_signer`. (6) `MM_MAX_DRIFT_BPS` + `/swap` Maker last-look (api server signs at `/swap`, not `/quote` — see OPERATIONS.md §5.4). |
 | v0.3    | 2026-05-18 | Pinocchio 0.11 port (drops `@coral-xyz/anchor` runtime). (1) Added 2-step admin rotation: `propose_admin` / `accept_admin` / `cancel_admin_proposal` (§3.9-3.11) + `AdminRotationProposal` state (§2.5) + `AdminProposalCreated`/`AdminProposalCancelled` events. (2) Error code surface expanded to 41 (added §61xx parameter checks, §63xx `QuoteAlreadyUsed`, §65xx safety-helper category). (3) Constants surface expanded: added `QUOTE_USED_SEED`, `ADMIN_PROPOSAL_SEED`, `BPS_DENOMINATOR`, `MODE_*_TTL`, sysvars, ed25519 program (§5). (4) Events emit-path changed from `emit!` macro to manual `sol_log_` with `EVT:<base64(tag‖borsh)>` framing. (5) SDK shim: Anchor-shaped `Program.methods.X.rpc()` surface preserved + raw `TransactionInstruction` builders for all 11 instructions + `simulateSwap` bit-identical TS port. (6) `SAFETY_BUFFER_SLOTS` cfg-gated under `test-feature` (5 slots for tests, 150 for prod). |
 | v0.2    | 2026-05-15 | (1) ExactIn interface + curve_evaluate unit conversion documented (Buy: quote → base equivalent). (2) New `admin_withdraw_inventory` instruction (vault → admin ATA). (3) Fixed skew_offset sign (imbalance = target − current; base-heavy ⇒ mid drops). (4) Specified SignedQuote canonical Borsh format (97 bytes) + MM monotonic nonce policy. (5) Applied `saturating_sub` (fork rollback). (6) 6-step init operational procedure. (7) Sanity-guard decision (not applied). (8) Quote replay = per-quote PDA + close reclaim. |
 | v0.1    | 2026-05-15 | Initial draft — defined 3 instructions. |

@@ -53,7 +53,7 @@ assets. Not production — the output is research data, not a live product.
 - Tests: Jest + ts-jest (drives `solana-test-validator` via `scripts/test.sh`; no `anchor test` orchestrator).
 
 ### Monorepo Layout
-- `programs/protocol/` — on-chain settlement program (11 instructions: init_pool, update_oracle, execute_swap, set_paused, rotate_oracle_signer, rotate_admin, admin_withdraw_inventory, close_expired_nonce, propose_admin, accept_admin, cancel_admin_proposal)
+- `programs/protocol/` — on-chain settlement program (12 instructions: init_pool, update_oracle, execute_swap, set_paused, rotate_oracle_signer, rotate_admin, admin_withdraw_inventory, close_expired_nonce, propose_admin, accept_admin, cancel_admin_proposal, rotate_quote_signer)
 - `sdk/` — TypeScript SDK (shared). Pinocchio-era port — no `@coral-xyz/anchor` runtime dep; exports an Anchor-shaped `Program` shim for back-compat.
 - `app/` — Next.js frontend (admin + user UI). Screen breakdown in [docs/OPERATIONS.md §14](docs/OPERATIONS.md)
 - `keeper/` — Deno oracle pusher. Only runs while Mode A/B is active.
@@ -63,8 +63,12 @@ assets. Not production — the output is research data, not a live product.
 
 > **Keeper vs API server — responsibility split**:
 > - Keeper     = write (pushes oracle via update_oracle). Active windows only.
-> - API server = read + sign (issues RFQ quotes). 24/7. Currently shares the
->   oracle hot key (future: split into a dedicated quote_signer).
+>   Hot key = `pool.authorized_oracle_signer`.
+> - API server = read + sign (issues RFQ quotes). 24/7. Hot key =
+>   `pool.authorized_quote_signer` (separate on-chain field). PoC may share a
+>   keypair file; production MUST set `QUOTE_SIGNER_WALLET_PATH` to a distinct
+>   keypair. Rotated independently via `rotate_oracle_signer` /
+>   `rotate_quote_signer`.
 
 ## Core Documentation
 
@@ -166,7 +170,7 @@ programs/protocol/src/
 ├── lib.rs             # entrypoint + 1-byte-tag dispatch table
 ├── constants.rs       # PDA seeds, well-known program ids, protocol parameters
 ├── error.rs           # ProtocolError enum → ProgramError::Custom(u32)
-├── events.rs          # Borsh + base64 event emit helpers (`Program log: EVT:<base64>`)
+├── events.rs          # Borsh + sol_log_data emit helpers (`Program data: <base64>`)
 ├── safety/            # Explicit checks (signer/owner/PDA/discriminator/token-mint/…)
 │   └── mod.rs
 ├── instructions/      # One file per instruction; each defines `process(...)`
@@ -300,12 +304,19 @@ let lamports = from_wad_ceil(wad_value)?;     // WAD → u64 (round up)
 
 ### Rounding Rules (Protocol Safety)
 
+Every integer division biased in the protocol's favour. Full table in
+[docs/SPECIFICATION.md §2.2](docs/SPECIFICATION.md#22-curve-formula). Summary:
+
 | Situation | Direction | Reason |
 |-----------|-----------|--------|
-| User **pays** | ceil (round up) | Protocol receives more |
-| User **receives** | floor (round down) | Protocol pays less |
+| User **pays** (input) | n/a — `input_amount` is exact (ExactIn) | — |
+| User **receives** (`output_amount`) | floor (round down) | Protocol pays less |
+| **Buy price** (`fair × bps_factor / 10_000`) | **ceil** | Output `= input × PRICE_SCALE / price` ⇒ higher price ⇒ less base out |
+| **Sell price** (`fair × bps_factor / 10_000`) | **floor** | Output `= input × price / PRICE_SCALE` ⇒ lower price ⇒ less quote out |
 | Fee calculation | ceil (round up) | Protocol collects at least minimum |
 | LP token issuance | floor (round down) | User receives less |
+| **Drift bps** (off-chain `/swap` last-look) | **ceil** | Stricter rejection — `T+ε` drift trips the threshold |
+| `half_spread = spread_bps / 2` | floor | Odd `spread_bps` ⇒ 1 bps left on table; set even `spread_bps` for exact symmetric take |
 
 ### Compute Unit (CU) Budget
 

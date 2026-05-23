@@ -8,6 +8,7 @@ import { AlertTriangle, Loader2 } from "lucide-react";
 import {
   createSetPausedIx,
   createRotateOracleSignerIx,
+  createRotateQuoteSignerIx,
   createRotateAdminIx,
   createProposeAdminIx,
   createAcceptAdminIx,
@@ -152,6 +153,28 @@ function ActionsView() {
       return new Transaction().add(ix);
     });
     setNewOracleSigner("");
+  };
+
+  // ────────────────────────────────────────────────────────────────────
+  // rotate_quote_signer (RFQ ed25519 signer — api server hot key)
+  // ────────────────────────────────────────────────────────────────────
+  const [newQuoteSigner, setNewQuoteSigner] = React.useState("");
+  const rotateQuoteSigner = async () => {
+    if (!pool || !poolAddress || !publicKey || !signingProgram) return;
+    if (!isValidPubkeyString(newQuoteSigner)) {
+      toast({ title: "Invalid pubkey", variant: "destructive" });
+      return;
+    }
+    const nextPk = new PublicKey(newQuoteSigner);
+    await runIx("Rotate quote signer", async () => {
+      const ix = await createRotateQuoteSignerIx(signingProgram, {
+        admin: publicKey,
+        poolState: poolAddress,
+        newAuthorizedQuoteSigner: nextPk,
+      });
+      return new Transaction().add(ix);
+    });
+    setNewQuoteSigner("");
   };
 
   // ────────────────────────────────────────────────────────────────────
@@ -329,6 +352,56 @@ function ActionsView() {
             }
           >
             {busy === "Rotate oracle signer" ? (
+              <>
+                <Loader2 className="mr-2 size-4 animate-spin" />
+                Submitting…
+              </>
+            ) : (
+              "Rotate"
+            )}
+          </Button>
+        </CardFooter>
+      </Card>
+
+      {/* Rotate quote signer */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Rotate quote signer</CardTitle>
+          <CardDescription>
+            Current:{" "}
+            <span className="font-mono">
+              {pool ? shortAddr(pool.state.authorizedQuoteSigner.toBase58(), 10, 10) : "—"}
+            </span>
+            <br />
+            <span className="text-xs text-muted-foreground">
+              ed25519 signer for RFQ <code>/swap</code> quotes (api-server hot
+              key). Independent from the oracle signer — rotate this key when
+              the api box is recycled or compromised.
+            </span>
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Label htmlFor="new-quote">New authorized quote signer</Label>
+          <Input
+            id="new-quote"
+            value={newQuoteSigner}
+            onChange={(e) => setNewQuoteSigner(e.target.value.trim())}
+            placeholder="Pubkey"
+            spellCheck={false}
+          />
+        </CardContent>
+        <CardFooter>
+          <Button
+            disabled={!pool || !isValidPubkeyString(newQuoteSigner) || busy != null}
+            onClick={() =>
+              setConfirmDialog({
+                title: "Rotate quote signer?",
+                description: `Authorized quote signer becomes ${shortAddr(newQuoteSigner, 10, 10)}. RFQ quotes already signed by the old key will be rejected on-chain.`,
+                action: rotateQuoteSigner,
+              })
+            }
+          >
+            {busy === "Rotate quote signer" ? (
               <>
                 <Loader2 className="mr-2 size-4 animate-spin" />
                 Submitting…

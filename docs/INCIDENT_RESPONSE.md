@@ -231,9 +231,11 @@ SEV-1 (potential key compromise or duplicate writer).
 ### Triage flow
 
 1. Hit `/health` — if 503, the process is down → restart.
-2. Hit `/metrics` with the bearer token — check `cipher_quote_latency_ms{quantile="0.95"}` and the `*_fail_total` counters.
+2. Hit `/metrics` with the bearer token — check `cipher_quote_latency_ms{quantile="0.95"}` and the `*_fail_total` / `*_reject_total` counters.
 3. If `quote_inventory_fail` is climbing, inventory rebalancing is overdue — call `admin_withdraw_inventory` / replenish.
-4. If latency p95 > 250ms with no inventory issues, the bottleneck is the RPC. Check `connection.getSlot()` latency manually; failover if needed.
+4. If `swap_drift_reject_total / swap_requests_total > 5 %` rolling, either upstream price source is too jittery or `MM_MAX_DRIFT_BPS` is too tight — investigate Pyth feed health first, then consider raising the threshold per OPERATIONS.md §5.4.
+5. If `swap_curve_fresh_reject_total` spikes, the keeper just entered an A/B window — that's expected; callers should retry on the curve path.
+6. If latency p95 > 250ms with no inventory / reject issues, the bottleneck is the RPC. Check `connection.getSlot()` latency manually; failover if needed.
 
 ---
 
@@ -292,6 +294,63 @@ journalctl -u cipher-quants-keeper -f | grep -i "push success\|nonce"
 
 # 6. Destroy the old key
 shred -u /var/lib/cipher-quants/keys/oracle.json.bak
+```
+
+### 7.1.b Quote signer hot key (scheduled rotation, no incident)
+
+Same cadence — every **90 days**. Independent from the oracle rotation
+schedule so the two hot keys never rotate in the same window. Rotate via
+the admin UI ("Rotate quote signer" card) or the SDK
+(`createRotateQuoteSignerIx`). The on-chain effect is immediate: every
+quote signed by the old key fails verification with
+`QuoteSignatureInvalid`. Outstanding `/quote` cache entries on the api
+server are still pre-signing (the MM only signs at `/swap`), so they
+re-sign with the new key automatically once the api process picks up the
+new key file.
+
+```bash
+# 1. Generate the new signer
+solana-keygen new --outfile /tmp/quote-next.json
+NEW_PK=$(solana address -k /tmp/quote-next.json)
+
+# 2. Rotate on-chain (same provider.sendAndConfirm pattern as §2 Step 1):
+NEW_PK=$NEW_PK node -e '
+  const { Connection, Keypair, Transaction, PublicKey } = require("@solana/web3.js");
+  const sdk = require("@cipher-quants/sdk");
+  (async () => {
+    const conn = new Connection(process.env.RPC_URL, "confirmed");
+    const admin = Keypair.fromSecretKey(
+      Uint8Array.from(require(process.env.ADMIN_WALLET_PATH)),
+    );
+    const provider = new sdk.AnchorProvider(conn, new sdk.Wallet(admin), {
+      commitment: "confirmed",
+      preflightCommitment: "confirmed",
+    });
+    const program = new sdk.Program(provider);
+    const ix = await sdk.createRotateQuoteSignerIx(program, {
+      admin: admin.publicKey,
+      poolState: new PublicKey(process.env.POOL),
+      newAuthorizedQuoteSigner: new PublicKey(process.env.NEW_PK),
+    });
+    const sig = await provider.sendAndConfirm(new Transaction().add(ix));
+    console.log("rotated quote signer", sig);
+  })();
+'
+
+# 3. Verify
+solana account <POOL_STATE_PUBKEY> --output json \
+  | jq -r '.authorizedQuoteSigner'   # must equal $NEW_PK
+
+# 4. Atomically swap on the api host
+sudo install -m 600 /tmp/quote-next.json /var/lib/cipher-quants/keys/quote-signer.json
+systemctl restart cipher-quants-api
+
+# 5. Confirm /swap signs with the new key
+curl -sf "$API_URL/health" && \
+  journalctl -u cipher-quants-api -n 50 | grep -i "Quote signer:"
+
+# 6. Destroy the old key
+shred -u /var/lib/cipher-quants/keys/quote-signer.json.bak
 ```
 
 ### 7.2 Admin key (planned handoff, e.g. moving to Squads multisig)

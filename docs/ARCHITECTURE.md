@@ -206,10 +206,10 @@ graph TD
 
 ```
 programs/protocol/src/
-├── lib.rs                       # 11 instruction entry points (1-byte tag dispatch)
+├── lib.rs                       # 12 instruction entry points (1-byte tag dispatch)
 ├── constants.rs                 # PDA seeds, MAX_TTL_SLOTS, MAX_SPREAD_BPS, SAFETY_BUFFER_SLOTS, PRICE_SCALE
-├── error.rs                     # 41 error codes (kept in sync with SPECIFICATION.md §4)
-├── events.rs                    # 10 events + manual base64 emit via sol_log_ (SPECIFICATION.md §3.12)
+├── error.rs                     # 42 error codes (kept in sync with SPECIFICATION.md §4)
+├── events.rs                    # 11 events emitted via sol_log_data → `Program data: <base64>` (SPECIFICATION.md §3.13)
 ├── safety/                      # Explicit verify_* helpers replacing Anchor's #[derive(Accounts)]
 │   └── mod.rs
 ├── instructions/
@@ -219,6 +219,7 @@ programs/protocol/src/
 │   ├── execute_swap.rs
 │   ├── set_paused.rs
 │   ├── rotate_oracle_signer.rs
+│   ├── rotate_quote_signer.rs    # RFQ ed25519 signer (api server hot key)
 │   ├── rotate_admin.rs           # single-step (irreversible)
 │   ├── propose_admin.rs          # 2-step rotation, step 1
 │   ├── accept_admin.rs           # 2-step rotation, step 2
@@ -288,6 +289,7 @@ programs/protocol/src/
 | `execute_swap` (RFQ fallback) | 42–85k CU | ed25519 verify + QuoteNonceMarker init + event |
 | `set_paused`                      | 5–7k CU        | Flag toggle + event                                              |
 | `rotate_oracle_signer`            | 5–7k CU        | Single-Pubkey update + event                                     |
+| `rotate_quote_signer`             | 5–7k CU        | Single-Pubkey update + event (RFQ ed25519 signer)                |
 | `rotate_admin`                    | 5–7k CU        | Single-Pubkey update + event (single-step, irreversible)         |
 | `propose_admin`                   | 7–9k CU        | 2-step rotation step 1 — allocates AdminRotationProposal PDA      |
 | `accept_admin`                    | ~5.5k CU       | 2-step rotation step 2 — updates pool.admin + closes proposal     |
@@ -296,13 +298,12 @@ programs/protocol/src/
 | `close_expired_nonce` | 5–12k CU | account close + event |
 
 > Each event-emit adds ~1–3k CU per instruction. Every state-changing
-> instruction emits an event ([SPECIFICATION.md §3.12](SPECIFICATION.md#312-events)).
+> instruction emits an event ([SPECIFICATION.md §3.13](SPECIFICATION.md#313-events)).
 
 Everything runs under the default 200k CU budget. Measurements come from
 `scripts/measure-cu.sh`, which subscribes to `solana logs <PROGRAM_ID>` while
 Jest is running (solana-test-validator doesn't persist program logs to disk)
-and writes a summary to `docs/PERFORMANCE.md`. The Pinocchio port typically
-lands ~30–50% below the original Anchor numbers above — re-baseline after
+and writes a summary to `docs/PERFORMANCE.md`. Re-baseline after
 CU-sensitive changes by running `pnpm cu:measure`.
 
 ---

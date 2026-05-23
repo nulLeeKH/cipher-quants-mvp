@@ -26,12 +26,16 @@ export interface KeeperConfig {
   rpcProvider: string;
 
   // ----- Wallets -----
-  /** Oracle worker key — calls update_oracle + ed25519-signs RFQ quotes. */
+  /** Oracle worker key — calls update_oracle. On-chain push hot key. */
   oracleWalletPath: string;
   /** Admin key — used for pause/rotate/withdraw and similar ops. */
   adminWalletPath: string;
   /** Fee payer the keeper uses when transferring tokens (usually same as admin). */
   feePayerWalletPath: string;
+  /** RFQ quote signer used by init_pool's `authorized_quote_signer` arg. The
+   *  api server actually signs quotes, but the keeper needs the pubkey at
+   *  init time. Unset → falls back to oracle key (PoC single-key default). */
+  quoteSignerWalletPath?: string;
 
   // ----- Protocol -----
   /** Optional override. Defaults to the SDK's PROGRAM_ID. */
@@ -135,6 +139,12 @@ export function loadConfig(args: Record<string, unknown>): KeeperConfig {
     feePayerWalletPath:
       (args.feePayerWallet as string) ||
       envOptional("FEE_PAYER_WALLET_PATH", `${home}/.config/solana/admin.json`),
+    // Optional. When set, init-pool uses this key as authorized_quote_signer
+    // (splitting the api hot key from the oracle hot key). Unset → reuses
+    // oracle key (PoC single-key default).
+    quoteSignerWalletPath:
+      (args.quoteSignerWallet as string) ||
+      Deno.env.get("QUOTE_SIGNER_WALLET_PATH"),
 
     programIdOverride: envPubkey("PROGRAM_ID"),
     baseMint: envPubkey("BASE_MINT"),

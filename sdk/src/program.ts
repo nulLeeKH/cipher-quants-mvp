@@ -43,6 +43,7 @@ import {
   encodeProposeAdmin,
   encodeRotateAdmin,
   encodeRotateOracleSigner,
+  encodeRotateQuoteSigner,
   encodeSetPaused,
   encodeUpdateOracle,
   type DepthParamsData,
@@ -390,6 +391,7 @@ export class Program<_T = unknown> {
   public readonly methods: {
     initPool: (
       authorizedOracleSigner: PublicKey,
+      authorizedQuoteSigner: PublicKey,
       initialFairValue: BN,
       initialSpreadBps: number,
       initialDepthParams: DepthParamsData & { reserved?: number[] },
@@ -421,6 +423,7 @@ export class Program<_T = unknown> {
     proposeAdmin: (newAdmin: PublicKey) => MethodBuilder;
     acceptAdmin: () => MethodBuilder;
     cancelAdminProposal: () => MethodBuilder;
+    rotateQuoteSigner: (newAuthorizedQuoteSigner: PublicKey) => MethodBuilder;
   };
 
   /** Event listeners (in-memory subscription registry). */
@@ -449,11 +452,12 @@ export class Program<_T = unknown> {
     };
 
     this.methods = {
-      initPool: (oracleSigner, fairValue, spreadBps, depth, skew, ttl) =>
+      initPool: (oracleSigner, quoteSigner, fairValue, spreadBps, depth, skew, ttl) =>
         new MethodBuilder(
           this,
           encodeInitPool({
             authorizedOracleSigner: oracleSigner,
+            authorizedQuoteSigner: quoteSigner,
             initialFairValue: fairValue,
             initialSpreadBps: spreadBps,
             initialDepthParams: stripReserved(depth),
@@ -615,6 +619,12 @@ export class Program<_T = unknown> {
           { name: "admin", isSigner: true, isWritable: true },
           { name: "poolState", isSigner: false, isWritable: false },
           { name: "adminProposal", isSigner: false, isWritable: true },
+        ]),
+
+      rotateQuoteSigner: (newSigner) =>
+        new MethodBuilder(this, encodeRotateQuoteSigner(newSigner), [
+          { name: "admin", isSigner: true, isWritable: false },
+          { name: "poolState", isSigner: false, isWritable: true },
         ]),
     };
   }

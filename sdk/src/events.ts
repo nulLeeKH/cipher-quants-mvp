@@ -24,6 +24,8 @@ export interface PoolInitializedData {
   pool: PublicKey;
   admin: PublicKey;
   oracleSigner: PublicKey;
+  /** Initial RFQ quote ed25519 signer (`pool.authorized_quote_signer`). */
+  quoteSigner: PublicKey;
   baseMint: PublicKey;
   quoteMint: PublicKey;
   initialFairValue: BN;
@@ -108,6 +110,14 @@ export interface AdminProposalCancelledData {
   slot: BN;
 }
 
+export interface QuoteSignerRotatedData {
+  pool: PublicKey;
+  admin: PublicKey;
+  previousSigner: PublicKey;
+  newSigner: PublicKey;
+  slot: BN;
+}
+
 export interface ProtocolEventDataMap {
   PoolInitialized: PoolInitializedData;
   OracleUpdated: OracleUpdatedData;
@@ -119,6 +129,7 @@ export interface ProtocolEventDataMap {
   QuoteMarkerClosed: QuoteMarkerClosedData;
   AdminProposalCreated: AdminProposalCreatedData;
   AdminProposalCancelled: AdminProposalCancelledData;
+  QuoteSignerRotated: QuoteSignerRotatedData;
 }
 
 export type ProtocolEventName = keyof ProtocolEventDataMap;
@@ -175,6 +186,7 @@ const TAG_INVENTORY_WITHDRAWN = 0x07;
 const TAG_QUOTE_MARKER_CLOSED = 0x08;
 const TAG_ADMIN_PROPOSAL_CREATED = 0x09;
 const TAG_ADMIN_PROPOSAL_CANCELLED = 0x0a;
+const TAG_QUOTE_SIGNER_ROTATED = 0x0b;
 
 function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
   const r = new Reader(body);
@@ -187,6 +199,7 @@ function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
             pool: r.pubkey(),
             admin: r.pubkey(),
             oracleSigner: r.pubkey(),
+            quoteSigner: r.pubkey(),
             baseMint: r.pubkey(),
             quoteMint: r.pubkey(),
             initialFairValue: r.u64(),
@@ -296,6 +309,17 @@ function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
             slot: r.u64(),
           },
         };
+      case TAG_QUOTE_SIGNER_ROTATED:
+        return {
+          name: "QuoteSignerRotated",
+          data: {
+            pool: r.pubkey(),
+            admin: r.pubkey(),
+            previousSigner: r.pubkey(),
+            newSigner: r.pubkey(),
+            slot: r.u64(),
+          },
+        };
       default:
         return null;
     }
@@ -307,13 +331,30 @@ function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
 /**
  * Decode a single log line into a DecodedEvent. Returns `null` for any line
  * that is not an event (or whose tag is unknown).
+ *
+ * The protocol emits events via the `sol_log_data` syscall, which surfaces
+ * as `Program data: <base64>` lines (Solana's standard event channel,
+ * decoded by every general-purpose indexer). The legacy `Program log: EVT:`
+ * format from the pre-2026-05 build is still recognised so older transaction
+ * logs replay correctly.
  */
 export function decodeEventLog(rawLine: string): DecodedEvent | null {
   let line = rawLine;
-  if (line.startsWith("Program log: ")) line = line.slice("Program log: ".length);
-  else if (line.startsWith("Program data: ")) line = line.slice("Program data: ".length);
-  if (!line.startsWith("EVT:")) return null;
-  const encoded = line.slice("EVT:".length).trim();
+  let encoded: string;
+  if (line.startsWith("Program data: ")) {
+    // Modern path: sol_log_data emits `Program data: <base64>` (possibly
+    // multiple space-separated base64 blobs if the program called
+    // sol_log_data with multiple slices — we use one slice = one blob).
+    let rest = line.slice("Program data: ".length).trim().split(/\s+/)[0];
+    // Be permissive: a legacy emitter that wrote `Program data: EVT:<b64>`
+    // (or a test fixture using that shape) still decodes.
+    if (rest.startsWith("EVT:")) rest = rest.slice("EVT:".length);
+    encoded = rest;
+  } else {
+    if (line.startsWith("Program log: ")) line = line.slice("Program log: ".length);
+    if (!line.startsWith("EVT:")) return null;
+    encoded = line.slice("EVT:".length).trim();
+  }
   const payload = base64Decode(encoded);
   if (!payload || payload.length < 1) return null;
   const tag = payload[0];

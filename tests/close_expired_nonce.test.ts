@@ -84,7 +84,7 @@ describe("close_expired_nonce — happy path (test-feature buffer)", () => {
     const nonce = BigInt(Date.now()); // unique per test run
 
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState,
         user: fx.user.publicKey,
@@ -197,7 +197,7 @@ describe("close_expired_nonce — happy path (test-feature buffer)", () => {
     const nonce = BigInt(Date.now()) + 1n;
 
     const { signedQuote, verifyIx } = buildSignedQuoteWithVerifyIx(
-      fx.oracleSigner,
+      fx.quoteSigner,
       {
         pool: fx.poolState,
         user: fx.user.publicKey,

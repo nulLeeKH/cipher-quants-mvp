@@ -40,7 +40,14 @@ Deno.test("renderMetrics — includes counter names + Prometheus headers", () =>
   m.quoteSuccess = 5;
   m.quoteInventoryFail = 1;
   m.quoteOtherFail = 1;
-  m.swapRequests = 2;
+  m.swapRequests = 4;
+  m.swapSuccess = 2;
+  m.swapDriftReject = 1;
+  m.swapInventoryReject = 0;
+  m.swapCurveFreshReject = 0;
+  m.swapExpiredReject = 1;
+  m.swapPausedReject = 0;
+  m.swapClientFail = 0;
   recordLatency(m, 10);
   recordLatency(m, 20);
   recordLatency(m, 30);
@@ -49,7 +56,10 @@ Deno.test("renderMetrics — includes counter names + Prometheus headers", () =>
   if (!out.includes("cipher_quote_success_total 5")) throw new Error(out);
   if (!out.includes("cipher_quote_inventory_fail_total 1")) throw new Error(out);
   if (!out.includes("cipher_quote_other_fail_total 1")) throw new Error(out);
-  if (!out.includes("cipher_swap_requests_total 2")) throw new Error(out);
+  if (!out.includes("cipher_swap_requests_total 4")) throw new Error(out);
+  if (!out.includes("cipher_swap_success_total 2")) throw new Error(out);
+  if (!out.includes("cipher_swap_drift_reject_total 1")) throw new Error(out);
+  if (!out.includes("cipher_swap_expired_reject_total 1")) throw new Error(out);
   if (!out.includes(`cipher_quote_latency_ms{quantile="0.95"}`)) throw new Error(out);
   if (!out.includes("# HELP")) throw new Error(out);
   if (!out.includes("# TYPE")) throw new Error(out);

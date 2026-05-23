@@ -97,7 +97,19 @@ pub fn evaluate(
         return Err(ProtocolError::MathUnderflow.into());
     }
 
-    let price = mul_div_floor(fair_value, bps_factor as u64, BPS_DENOMINATOR)?;
+    // Rounding policy — always bias in the protocol's favour:
+    //   Buy  (user pays quote, receives base): downstream output = input * PRICE_SCALE / price
+    //        → minimise output ⇒ maximise price ⇒ CEIL price.
+    //   Sell (user pays base, receives quote): downstream output = input * price / PRICE_SCALE
+    //        → minimise output ⇒ minimise price ⇒ FLOOR price.
+    // Downstream `output_amount` is FLOOR in both directions (execute_swap).
+    // The half-spread used above is `spread_bps / 2` (integer truncation) — for
+    // odd spread_bps this loses 1 bps of intended take. Use even spread_bps to
+    // get exact symmetric take. See docs/SPECIFICATION.md §2.2 (Rounding rules).
+    let price = match direction {
+        Side::Buy => mul_div_ceil(fair_value, bps_factor as u64, BPS_DENOMINATOR)?,
+        Side::Sell => mul_div_floor(fair_value, bps_factor as u64, BPS_DENOMINATOR)?,
+    };
     Ok(price)
 }
 

@@ -25,6 +25,12 @@ export interface InitPoolParams {
   baseMint: PublicKey;
   quoteMint: PublicKey;
   authorizedOracleSigner: PublicKey;
+  /** Initial RFQ quote ed25519 signer. Required and must be non-zero. A
+   *  distinct keypair from `authorizedOracleSigner` halves the blast radius
+   *  of either hot key being compromised. PoC may pass the same key for
+   *  convenience but production deployments MUST split. Rotated via
+   *  `rotate_quote_signer`. */
+  authorizedQuoteSigner: PublicKey;
   initialFairValue: BN;
   initialSpreadBps: number;
   initialDepthParams: DepthParams;
@@ -54,6 +60,7 @@ export async function createInitPoolIx(
   return program.methods
     .initPool(
       params.authorizedOracleSigner,
+      params.authorizedQuoteSigner,
       params.initialFairValue,
       params.initialSpreadBps,
       params.initialDepthParams,
