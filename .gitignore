@@ -35,3 +35,4 @@ keeper/keeper
 # TS incremental build cache (per-machine)
 *.tsbuildinfo
 .next
+.claude/

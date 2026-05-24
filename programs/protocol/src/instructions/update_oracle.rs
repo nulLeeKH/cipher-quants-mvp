@@ -5,7 +5,13 @@ use pinocchio::{
 
 use crate::constants::*;
 use crate::error::ProtocolError;
-use crate::events::{emit_oracle_updated, OracleUpdated};
+// Note: `OracleUpdated` event intentionally NOT emitted from this hot path.
+// Every field it carried (`fair_value`, `spread_bps`, `new_nonce`, `new_ttl`,
+// `last_oracle_update_slot`) is written to PoolState in this same ix, so
+// subscribers should listen for `Connection.onAccountChange(pool_state)` and
+// diff fields — zero information loss, ~600-800 CU saved per emit. The
+// `OracleUpdated` struct + decoder remain in events.rs / sdk/events.ts for
+// back-compat with historical transaction logs.
 use crate::safety::{verify_owner_program, verify_signer, verify_writable};
 use crate::state::{offset, PoolState};
 
@@ -24,8 +30,7 @@ use crate::state::{offset, PoolState};
 //      `init_pool` can mint a fresh program-owned PoolState, and it derives
 //      the PDA itself with the canonical seeds.
 //
-// CU history: 5086 → ~1000 (~80% reduction). Event emit retained for FE +
-// indexer subscribers.
+// CU history: 5086 → 313 (~94% reduction). Full record in docs/CU_OPTIMIZATION.md.
 
 const IX_DATA_LEN: usize = 8 + 2 + 20 + 16 + 8 + 1; // 55 bytes
 
@@ -47,11 +52,10 @@ pub fn process(
     verify_owner_program(pool_info, &PROGRAM_ID)?;
 
     // ----- Parse ix data inline (no Borsh) -----
-    // Layout: [fair_value u64 LE | spread_bps u16 LE | depth(20) | skew(16) | nonce u64 LE | ttl u8]
+    // Layout (matches state[FAIR_VALUE..SKEW_PARAMS+16] verbatim for fields 0..46):
+    //   [fair_value u64 LE | spread_bps u16 LE | depth(20) | skew(16) | nonce u64 LE | ttl u8]
     let new_fair_value = u64::from_le_bytes(ix_data[0..8].try_into().unwrap());
     let new_spread_bps = u16::from_le_bytes(ix_data[8..10].try_into().unwrap());
-    let depth_bytes: &[u8; 20] = ix_data[10..30].try_into().unwrap();
-    let skew_bytes: &[u8; 16] = ix_data[30..46].try_into().unwrap();
     let new_nonce = u64::from_le_bytes(ix_data[46..54].try_into().unwrap());
     let new_ttl = ix_data[54];
 
@@ -65,33 +69,33 @@ pub fn process(
     if new_ttl > MAX_TTL_SLOTS {
         return Err(ProtocolError::InvalidTtl.into());
     }
-    // DepthParams = depth_coef_bps:u32 (0..4) | size_unit:u64 (4..12) | max_depth_bps:u16 (12..14) | _reserved[6]
-    let depth_size_unit =
-        u64::from_le_bytes(depth_bytes[4..12].try_into().unwrap());
-    let depth_max_bps =
-        u16::from_le_bytes(depth_bytes[12..14].try_into().unwrap());
+    // DepthParams = depth_coef_bps:u32 (10..14) | size_unit:u64 (14..22) | max_depth_bps:u16 (22..24) | _reserved[6]
+    let depth_size_unit = u64::from_le_bytes(ix_data[14..22].try_into().unwrap());
+    let depth_max_bps = u16::from_le_bytes(ix_data[22..24].try_into().unwrap());
     if depth_max_bps > MAX_DEPTH_BPS || depth_size_unit == 0 {
         return Err(ProtocolError::InvalidDepthParams.into());
     }
-    // SkewParams = target_base_bps:u16 (0..2) | skew_coef_bps:u16 (2..4) | max_skew_offset_bps:u16 (4..6) | _reserved[10]
-    let skew_target = u16::from_le_bytes(skew_bytes[0..2].try_into().unwrap());
-    let skew_max_off = u16::from_le_bytes(skew_bytes[4..6].try_into().unwrap());
+    // SkewParams = target_base_bps:u16 (30..32) | skew_coef_bps:u16 (32..34) | max_skew_offset_bps:u16 (34..36) | _reserved[10]
+    let skew_target = u16::from_le_bytes(ix_data[30..32].try_into().unwrap());
+    let skew_max_off = u16::from_le_bytes(ix_data[34..36].try_into().unwrap());
     if skew_max_off > MAX_SKEW_OFFSET_BPS || (skew_target as u64) > BPS_DENOMINATOR {
         return Err(ProtocolError::InvalidSkewParams.into());
     }
 
     let slot = Clock::get()?.slot;
-    let pool_key = *pool_info.address();
     let signer_key = *oracle_signer_info.address();
 
     // ----- Zero-copy state access -----
     let mut data = pool_info.try_borrow_mut()?;
 
-    // Discriminator gate replaces the no-longer-called `from_account_view`.
-    if data.len() < PoolState::ACCOUNT_SIZE
-        || data[..offset::DISC_LEN] != PoolState::DISCRIMINATOR
-    {
-        return Err(ProtocolError::WrongDiscriminator.into());
+    // Account-size gate. Discriminator check (8 bytes at offset 0) deliberately
+    // skipped: only init_pool can mint a program-owned PoolState (PDA-derived),
+    // and the *other* program-owned account types are smaller — QuoteNonceMarker
+    // = 64 B, AdminRotationProposal = 120 B, both < ACCOUNT_SIZE. The
+    // length check below therefore disambiguates without the extra 8-byte
+    // compare. ~20 CU saved.
+    if data.len() < PoolState::ACCOUNT_SIZE {
+        return Err(ProtocolError::WrongAccountSize.into());
     }
 
     // ---- 3 read-only gate checks ----
@@ -112,32 +116,19 @@ pub fn process(
         return Err(ProtocolError::NonceNotMonotonic.into());
     }
 
-    // ---- 7 mutated-field writes ----
-    data[offset::FAIR_VALUE..offset::FAIR_VALUE + 8]
-        .copy_from_slice(&new_fair_value.to_le_bytes());
-    data[offset::SPREAD_BPS..offset::SPREAD_BPS + 2]
-        .copy_from_slice(&new_spread_bps.to_le_bytes());
-    data[offset::DEPTH_PARAMS..offset::DEPTH_PARAMS + 20].copy_from_slice(depth_bytes);
-    data[offset::SKEW_PARAMS..offset::SKEW_PARAMS + 16].copy_from_slice(skew_bytes);
+    // ---- Combined writes ----
+    // FAIR_VALUE..SKEW_PARAMS+16 = state[224..270] = 46 contiguous bytes that
+    // exactly mirror ix_data[0..46] (fair | spread | depth | skew). One memcpy
+    // beats 4 separate copy_from_slice calls. Then nonce/slot/ttl follow.
+    data[offset::FAIR_VALUE..offset::SKEW_PARAMS + 16].copy_from_slice(&ix_data[0..46]);
     data[offset::LAST_ORACLE_UPDATE_SLOT..offset::LAST_ORACLE_UPDATE_SLOT + 8]
         .copy_from_slice(&slot.to_le_bytes());
     data[offset::ORACLE_NONCE..offset::ORACLE_NONCE + 8]
         .copy_from_slice(&new_nonce.to_le_bytes());
     data[offset::CURRENT_MODE_TTL] = new_ttl;
 
-    drop(data); // release borrow before event emit (which may allocate)
-
-    emit_oracle_updated(&OracleUpdated {
-        pool: pool_key,
-        // signer_key was the gate-check pubkey, and we just confirmed
-        // data[AUTHORIZED_ORACLE_SIGNER] == signer_key.
-        oracle_signer: signer_key,
-        new_fair_value,
-        new_spread_bps,
-        new_nonce,
-        new_ttl,
-        slot,
-    });
+    drop(data);
+    let _ = (signer_key, slot); // intentionally unused — no event emit; all info written to PoolState.
 
     Ok(())
 }

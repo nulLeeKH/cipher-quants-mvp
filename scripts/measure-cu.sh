@@ -89,8 +89,16 @@ fi
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 
-awk -v our_re="$OUR_IX_RE" -v consumed_re="Program $PROGRAM_ID consumed [0-9]+ of [0-9]+ compute units" '
-  # Only our 11 instruction names update the tracker; SPL Token CPI lines
+awk -v our_re="$OUR_IX_RE" -v consumed_re="Program $PROGRAM_ID consumed [0-9]+ of [0-9]+ compute units" -v invoke_re="Program $PROGRAM_ID invoke \\\\[1\\\\]" '
+  # Track the most recent OUR-program invoke so an unlabeled consumed-line
+  # (no preceding `Instruction: <Name>`) is attributable. UpdateOracle is the
+  # only ix that intentionally skips its IX_LOG_LINES emit on the keeper hot
+  # path (programs/protocol/src/lib.rs) to shave CU.
+  $0 ~ invoke_re {
+    invoked = 1
+    next
+  }
+  # Only our 12 instruction names update the tracker; SPL Token CPI lines
   # like `Instruction: Transfer` / `Instruction: InitializeAccount3` are
   # ignored.
   /Program log: Instruction:/ {
@@ -102,14 +110,20 @@ awk -v our_re="$OUR_IX_RE" -v consumed_re="Program $PROGRAM_ID consumed [0-9]+ o
     next
   }
   # Only OUR program-id consumed line pairs with the most recent
-  # `Instruction: <ours>`. Sub-CPI consumed lines (Transfer, InitializeAccount3)
-  # appear inside the same tx and would mis-attribute.
+  # `Instruction: <ours>` (or invoke when the ix omitted its log line).
+  # Sub-CPI consumed lines (Transfer, InitializeAccount3) belong to other
+  # programs and never match this consumed_re anyway.
   $0 ~ consumed_re {
     match($0, /consumed [0-9]+/)
     n = substr($0, RSTART + 9, RLENGTH - 9) + 0
     if (ix != "") {
       print ix "\t" n
       ix = ""
+      invoked = 0
+    } else if (invoked) {
+      # Hot path: no Instruction line was emitted ⇒ attribute to UpdateOracle.
+      print "UpdateOracle\t" n
+      invoked = 0
     }
   }
 ' "$LOG_FILE" > "$TMP"

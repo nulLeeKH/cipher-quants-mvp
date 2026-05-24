@@ -13,21 +13,21 @@
 
 | Instruction | Samples | Min | Mean | P95 | Max | Status |
 |---|---:|---:|---:|---:|---:|---|
-| AcceptAdmin | 3 | 5676 | 5676 | 5676 | 5676 | ✅ |
-| AdminWithdrawInventory | 4 | 10398 | 11820 | 10401 | 16084 | ✅ |
-| CancelAdminProposal | 3 | 5011 | 5011 | 5011 | 5011 | ✅ |
-| CloseExpiredNonce | 2 | 4455 | 4455 | 4455 | 4455 | ✅ |
-| ExecuteSwap | 12 | 18440 | 20343 | 22396 | 23896 | ✅ |
-| InitPool | 37 | 26482 | 30658 | 36982 | 41482 | ✅ |
-| ProposeAdmin | 13 | 7400 | 9362 | 11900 | 16400 | ✅ |
-| RotateAdmin | 4 | 5072 | 5072 | 5072 | 5072 | ✅ |
-| RotateOracleSigner | 2 | 5975 | 5975 | 5975 | 5975 | ✅ |
-| RotateQuoteSigner | 2 | 5976 | 5976 | 5976 | 5976 | ✅ |
-| SetPaused | 7 | 4113 | 4113 | 4114 | 4114 | ✅ |
-| UpdateOracle | 12 | 3107 | 3107 | 3107 | 3107 | ✅ |
+| AcceptAdmin | 3 | 3323 | 3323 | 3323 | 3323 | ✅ |
+| AdminWithdrawInventory | 4 | 8525 | 9947 | 8528 | 14211 | ✅ |
+| CancelAdminProposal | 3 | 2658 | 2658 | 2658 | 2658 | ✅ |
+| CloseExpiredNonce | 2 | 2582 | 2582 | 2582 | 2582 | ✅ |
+| ExecuteSwap | 12 | 16385 | 18289 | 21842 | 21842 | ✅ |
+| InitPool | 37 | 21772 | 26394 | 32272 | 33772 | ✅ |
+| ProposeAdmin | 13 | 5047 | 6201 | 6547 | 9547 | ✅ |
+| RotateAdmin | 4 | 2719 | 2719 | 2719 | 2719 | ✅ |
+| RotateOracleSigner | 2 | 2854 | 2854 | 2854 | 2854 | ✅ |
+| RotateQuoteSigner | 2 | 2855 | 2855 | 2855 | 2855 | ✅ |
+| SetPaused | 7 | 2551 | 2551 | 2552 | 2552 | ✅ |
+| UpdateOracle | 12 | 313 | 313 | 313 | 313 | ✅ |
 
 ## Raw sample count
 
     101 consumed-line samples from .anchor/program-cu.log
 
-_Generated 2026-05-23T14:44:28Z_
+_Generated 2026-05-24T02:30:36Z_

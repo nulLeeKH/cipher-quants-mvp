@@ -807,7 +807,12 @@ describe("security — discriminator integrity", () => {
     );
   });
 
-  it("update_oracle rejects pool_state slot occupied by a QuoteNonceMarker (WrongDiscriminator)", async () => {
+  it("update_oracle rejects pool_state slot occupied by a QuoteNonceMarker (WrongAccountSize — discriminator check redundant per v0.6)", async () => {
+    // update_oracle (v0.6+ hot path) drops the discriminator check because the
+    // ACCOUNT_SIZE gate already disambiguates: PoolState=331B vs
+    // QuoteNonceMarker=64B / AdminRotationProposal=120B. WrongAccountSize is
+    // therefore the expected reject code now. WrongDiscriminator still fires
+    // on the other instructions (see admin_withdraw_inventory test below).
     await expect(
       ctx.program.methods
         .updateOracle(
@@ -820,11 +825,11 @@ describe("security — discriminator integrity", () => {
         )
         .accountsPartial({
           oracleSigner: fx.oracleSigner.publicKey,
-          poolState: markerPda, // program-owned but wrong tag
+          poolState: markerPda, // program-owned but wrong account type
         })
         .signers([fx.oracleSigner])
         .rpc()
-    ).rejects.toThrow(/WrongDiscriminator|0x195e/);
+    ).rejects.toThrow(/WrongAccountSize|0x196c/);
   });
 
   it("admin_withdraw_inventory rejects pool_state slot occupied by a QuoteNonceMarker (WrongDiscriminator)", async () => {

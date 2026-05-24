@@ -98,7 +98,7 @@ fails with `UnauthorizedOracle (6200)`).
 
 ### Step 3 — Investigate before unpausing
 
-- Pull the last 100 `OracleUpdated` events from the indexer / a one-shot Solana RPC `getSignaturesForAddress(pool) → getTransaction` loop, then decode via `parseEventsFromTx` from `@cipher-quants/sdk`. (`pnpm cu:measure` writes `.anchor/program-cu.log` for CU sampling, not event archival.)
+- Pull the last 100 `update_oracle` txs from the indexer / a one-shot Solana RPC `getSignaturesForAddress(pool) → getTransaction` loop. **As of protocol v0.6 `update_oracle` does not emit an event** (every field is in `PoolState`), so don't `parseEventsFromTx` on these txs — instead, replay each tx's account-data diff against the prior `PoolState` snapshot, or have the keeper's own logger preserve a parallel record. For state-changing ixs that still emit (Swap / Init / Rotate / Withdraw / Close / Admin proposals), `parseEventsFromTx` from `@cipher-quants/sdk` works as before. (`pnpm cu:measure` writes `.anchor/program-cu.log` for CU sampling, not event archival.)
 - Compare the suspect `update_oracle` payloads against the keeper's own log.
 - If the compromise predates rotation, treasury is *not* at risk (oracle key cannot withdraw); confirm by reading `pool_state.admin` is unchanged.
 

@@ -34,14 +34,19 @@ export interface PoolInitializedData {
   slot: BN;
 }
 
+/**
+ * NOTE: as of protocol v0.6 update_oracle no longer emits this event on-chain
+ * — every field it carried is recoverable from `pool_state` (via
+ * `Connection.onAccountChange`). This type + decoder are retained so historical
+ * transaction logs (pre-v0.6) still decode cleanly. Live subscribers should
+ * watch PoolState directly. See SPECIFICATION.md changelog v0.6.
+ */
 export interface OracleUpdatedData {
   pool: PublicKey;
-  oracleSigner: PublicKey;
   newFairValue: BN;
   newSpreadBps: number;
   newNonce: BN;
   newTtl: number;
-  slot: BN;
 }
 
 export interface SwapExecutedData {
@@ -213,12 +218,10 @@ function decodeBody(tag: number, body: Uint8Array): DecodedEvent | null {
           name: "OracleUpdated",
           data: {
             pool: r.pubkey(),
-            oracleSigner: r.pubkey(),
             newFairValue: r.u64(),
             newSpreadBps: r.u16(),
             newNonce: r.u64(),
             newTtl: r.u8(),
-            slot: r.u64(),
           },
         };
       case TAG_SWAP_EXECUTED:

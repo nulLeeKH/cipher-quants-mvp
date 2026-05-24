@@ -132,8 +132,12 @@ pub fn process_instruction(
 
     #[cfg(target_os = "solana")]
     {
+        // UpdateOracle (tag = 1) is the keeper's hot path (every 200 ms in
+        // Mode A). Skip the `Instruction: <Name>` log line for it to shave
+        // ~125–300 CU. scripts/measure-cu.sh attributes any unlabeled
+        // consumed-CU sample for OUR program to UpdateOracle as a result.
         let idx = *tag as usize;
-        if idx < IX_LOG_LINES.len() {
+        if idx != InstructionTag::UpdateOracle as usize && idx < IX_LOG_LINES.len() {
             let line: &[u8] = IX_LOG_LINES[idx];
             // SAFETY: `line` is a `'static [u8]` from the table above.
             unsafe {
