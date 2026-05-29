@@ -1,15 +1,75 @@
-import { PublicKey } from "@solana/web3.js";
+import type { Connection, PublicKey } from "@solana/web3.js";
+import { PublicKey as SolanaPublicKey } from "@solana/web3.js";
 
+import type { ResolvedApiConfig } from "../runtime.ts";
 import { computeFreshness } from "../freshness.ts";
 import { nextQuoteNonce } from "../nonce.ts";
 import { computeQuotePricing } from "../quote_pricing.ts";
-import type { PendingQuote } from "../quote_store.ts";
-import type { ApiRuntime } from "../runtime.ts";
+import type { PendingQuote, QuoteStore } from "../quote_store.ts";
 import type {
   ApiStatus,
   QuoteRequest,
   QuoteResponse,
 } from "../http/contracts.ts";
+
+interface NumberLike {
+  toNumber(): number;
+}
+
+interface StringLike {
+  toString(): string;
+}
+
+interface PoolQuoteState {
+  paused: boolean;
+  lastOracleUpdateSlot: NumberLike;
+  currentModeTtl: number;
+  fairValue: StringLike;
+  spreadBps: number;
+}
+
+interface VaultBalances {
+  baseAmount: bigint;
+  quoteAmount: bigint;
+}
+
+interface ProgramLike {
+  programId: PublicKey;
+}
+
+export interface QuoteServiceDeps {
+  config: ResolvedApiConfig;
+  connection: Pick<Connection, "getSlot">;
+  program: ProgramLike;
+  quoteStore: QuoteStore;
+  sdk: {
+    PRICE_SCALE: bigint;
+    directionFromMints(
+      inputMint: PublicKey,
+      outputMint: PublicKey,
+      baseMint: PublicKey,
+      quoteMint: PublicKey,
+    ): "buy" | "sell";
+  };
+  sdkAccounts: {
+    fetchPoolState(
+      program: ProgramLike,
+      baseMint: PublicKey,
+      quoteMint: PublicKey,
+    ): Promise<{ address: PublicKey; state: PoolQuoteState }>;
+    fetchVaultBalances(
+      program: ProgramLike,
+      poolAddr: PublicKey,
+      baseMint: PublicKey,
+      quoteMint: PublicKey,
+    ): Promise<VaultBalances>;
+    deriveQuoteNonceMarker(
+      poolAddr: PublicKey,
+      nonce: bigint,
+      programId: PublicKey,
+    ): [PublicKey];
+  };
+}
 
 export type QuoteServiceResult = {
   status: ApiStatus;
@@ -25,14 +85,14 @@ export type QuoteServiceResult = {
 };
 
 export async function createQuote(
-  runtime: ApiRuntime,
+  deps: QuoteServiceDeps,
   body: QuoteRequest,
 ): Promise<QuoteServiceResult> {
-  const { config, connection, program, quoteStore, sdk, sdkAccounts } = runtime;
+  const { config, connection, program, quoteStore, sdk, sdkAccounts } = deps;
 
-  const inputMint = new PublicKey(body.inputMint);
-  const outputMint = new PublicKey(body.outputMint);
-  const userPk = new PublicKey(body.userPubkey);
+  const inputMint = new SolanaPublicKey(body.inputMint);
+  const outputMint = new SolanaPublicKey(body.outputMint);
+  const userPk = new SolanaPublicKey(body.userPubkey);
   const inAmount = BigInt(body.inAmount);
   if (inAmount <= 0n) {
     return { status: 400, body: { error: "inAmount must be > 0" } };
@@ -41,15 +101,15 @@ export async function createQuote(
   const direction = sdk.directionFromMints(
     inputMint,
     outputMint,
-    config.baseMint!,
-    config.quoteMint!,
-  ) as "buy" | "sell";
+    config.baseMint,
+    config.quoteMint,
+  );
 
   // Read on-chain pool state (24/7 fresh)
   const { address: poolAddr, state: pool } = await sdkAccounts.fetchPoolState(
     program,
-    config.baseMint!,
-    config.quoteMint!,
+    config.baseMint,
+    config.quoteMint,
   );
 
   if (pool.paused) {
@@ -61,7 +121,7 @@ export async function createQuote(
   const currentSlot = await connection.getSlot();
   const freshness = computeFreshness({
     lastOracleUpdateSlot: pool.lastOracleUpdateSlot.toNumber(),
-    currentModeTtl: pool.currentModeTtl as number,
+    currentModeTtl: pool.currentModeTtl,
     paused: pool.paused,
     currentSlot,
   });
@@ -77,10 +137,10 @@ export async function createQuote(
   const fairValue = BigInt(pool.fairValue.toString());
   const pricing = computeQuotePricing({
     fairValue,
-    spreadBps: pool.spreadBps as number,
+    spreadBps: pool.spreadBps,
     inAmount,
     direction,
-    priceScale: sdk.PRICE_SCALE as bigint,
+    priceScale: sdk.PRICE_SCALE,
   });
   const { price, outAmount } = pricing;
 
@@ -89,8 +149,8 @@ export async function createQuote(
   const balances = await sdkAccounts.fetchVaultBalances(
     program,
     poolAddr,
-    config.baseMint!,
-    config.quoteMint!,
+    config.baseMint,
+    config.quoteMint,
   );
   const availableOut = direction === "buy"
     ? balances.baseAmount

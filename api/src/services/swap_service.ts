@@ -1,26 +1,140 @@
 import { Buffer } from "node:buffer";
 
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
-import { PublicKey } from "@solana/web3.js";
+import {
+  type Keypair,
+  PublicKey,
+  type TransactionInstruction,
+} from "@solana/web3.js";
 import BN from "bn.js";
 
 import { computeFreshness } from "../freshness.ts";
 import { assembleSwapTx } from "../swap_tx.ts";
-import type { ApiRuntime } from "../runtime.ts";
+import type { ResolvedApiConfig } from "../runtime.ts";
+import type { QuoteStore } from "../quote_store.ts";
 import type {
   ApiStatus,
   SwapRequest,
   SwapResponse,
 } from "../http/contracts.ts";
 
+interface NumberLike {
+  toNumber(): number;
+}
+
+interface StringLike {
+  toString(): string;
+}
+
+interface PoolSwapState {
+  paused: boolean;
+  lastOracleUpdateSlot: NumberLike;
+  currentModeTtl: number;
+  fairValue: StringLike;
+}
+
+interface VaultBalances {
+  baseAmount: bigint;
+  quoteAmount: bigint;
+}
+
+interface ProgramLike {
+  programId: PublicKey;
+}
+
+interface SignedQuoteLike {
+  pool: PublicKey;
+  user: PublicKey;
+  direction: number;
+  inputAmount: StringLike;
+  price: StringLike;
+  expirySlot: StringLike;
+  nonce: StringLike;
+  signature: string;
+}
+
+export type SwapMetric =
+  | "clientFail"
+  | "pausedReject"
+  | "expiredReject"
+  | "curveFreshReject"
+  | "driftReject"
+  | "inventoryReject"
+  | "success";
+
+export interface SwapServiceDeps {
+  config: ResolvedApiConfig;
+  connection: {
+    getSlot(): Promise<number>;
+    getLatestBlockhash(commitment: "confirmed"): Promise<{
+      blockhash: string;
+      lastValidBlockHeight: number;
+    }>;
+  };
+  program: ProgramLike;
+  quoteSigner: Keypair;
+  quoteStore: QuoteStore;
+  sdk: {
+    buildSignedQuoteWithVerifyIx(
+      quoteSigner: Keypair,
+      quote: {
+        pool: PublicKey;
+        user: PublicKey;
+        direction: "buy" | "sell";
+        inputAmount: bigint;
+        price: bigint;
+        expirySlot: bigint;
+        nonce: bigint;
+      },
+    ): { signedQuote: SignedQuoteLike; verifyIx: TransactionInstruction };
+  };
+  sdkAccounts: {
+    fetchPoolState(
+      program: ProgramLike,
+      baseMint: PublicKey,
+      quoteMint: PublicKey,
+    ): Promise<{ state: PoolSwapState }>;
+    fetchVaultBalances(
+      program: ProgramLike,
+      poolAddr: PublicKey,
+      baseMint: PublicKey,
+      quoteMint: PublicKey,
+    ): Promise<VaultBalances>;
+    deriveVault(
+      poolAddr: PublicKey,
+      mint: PublicKey,
+      programId: PublicKey,
+    ): [PublicKey];
+  };
+  sdkInstructions: {
+    createExecuteSwapIx(
+      program: ProgramLike,
+      args: {
+        user: PublicKey;
+        poolState: PublicKey;
+        baseVault: PublicKey;
+        quoteVault: PublicKey;
+        userBaseAta: PublicKey;
+        userQuoteAta: PublicKey;
+        inputAmount: BN;
+        direction: "buy" | "sell";
+        minOutput: BN;
+        signedQuote: SignedQuoteLike;
+        quoteNonceMarker: PublicKey;
+      },
+    ): Promise<TransactionInstruction>;
+  };
+}
+
 export type SwapServiceResult = {
   status: ApiStatus;
   body: unknown;
+  metric?: SwapMetric;
   log?: { quoteId: string };
 };
 
 export async function createSwap(
-  runtime: ApiRuntime,
+  deps: SwapServiceDeps,
   body: SwapRequest,
 ): Promise<SwapServiceResult> {
   const {
@@ -32,13 +146,15 @@ export async function createSwap(
     sdk,
     sdkAccounts,
     sdkInstructions,
-    metrics,
-  } = runtime;
+  } = deps;
 
   const pending = quoteStore.get(body.quoteId);
   if (!pending) {
-    metrics.swapClientFail += 1;
-    return { status: 404, body: { error: "Unknown or expired quoteId" } };
+    return {
+      status: 404,
+      body: { error: "Unknown or expired quoteId" },
+      metric: "clientFail",
+    };
   }
 
   // The userPubkey on /swap must match the userPubkey baked into /quote.
@@ -46,49 +162,58 @@ export async function createSwap(
   try {
     const requester = new PublicKey(body.userPubkey);
     if (!requester.equals(pending.userPk)) {
-      metrics.swapClientFail += 1;
       return {
         status: 403,
         body: { error: "userPubkey does not match the quote's bound user" },
+        metric: "clientFail",
       };
     }
   } catch {
-    metrics.swapClientFail += 1;
-    return { status: 400, body: { error: "Invalid userPubkey" } };
+    return {
+      status: 400,
+      body: { error: "Invalid userPubkey" },
+      metric: "clientFail",
+    };
   }
 
   // Last-look (Maker-side reject gate). The MM's signed ed25519 message is the
   // commitment, so signing is delayed until every check below passes.
   const { state: pool } = await sdkAccounts.fetchPoolState(
     program,
-    config.baseMint!,
-    config.quoteMint!,
+    config.baseMint,
+    config.quoteMint,
   );
 
   if (pool.paused) {
-    metrics.swapPausedReject += 1;
-    return { status: 503, body: { error: "Pool is paused" } };
+    return {
+      status: 503,
+      body: { error: "Pool is paused" },
+      metric: "pausedReject",
+    };
   }
 
   const currentSlot = await connection.getSlot();
   if (BigInt(currentSlot) >= pending.expirySlot) {
-    metrics.swapExpiredReject += 1;
-    return { status: 410, body: { error: "Quote expired" } };
+    return {
+      status: 410,
+      body: { error: "Quote expired" },
+      metric: "expiredReject",
+    };
   }
 
   const freshness = computeFreshness({
     lastOracleUpdateSlot: pool.lastOracleUpdateSlot.toNumber(),
-    currentModeTtl: pool.currentModeTtl as number,
+    currentModeTtl: pool.currentModeTtl,
     paused: pool.paused,
     currentSlot,
   });
   if (freshness.fresh) {
-    metrics.swapCurveFreshReject += 1;
     return {
       status: 409,
       body: {
         error: "Curve became fresh — use direct execute_swap (curve path)",
       },
+      metric: "curveFreshReject",
     };
   }
 
@@ -101,7 +226,6 @@ export async function createSwap(
   const driftBps = (drift * 10_000n + pending.fairValueAtQuote - 1n) /
     pending.fairValueAtQuote;
   if (driftBps > BigInt(config.mmMaxDriftBps)) {
-    metrics.swapDriftReject += 1;
     return {
       status: 409,
       body: {
@@ -109,6 +233,7 @@ export async function createSwap(
         driftBps: driftBps.toString(),
         maxBps: config.mmMaxDriftBps,
       },
+      metric: "driftReject",
     };
   }
 
@@ -116,14 +241,13 @@ export async function createSwap(
   const balances = await sdkAccounts.fetchVaultBalances(
     program,
     pending.poolAddr,
-    config.baseMint!,
-    config.quoteMint!,
+    config.baseMint,
+    config.quoteMint,
   );
   const availableOut = pending.direction === "buy"
     ? balances.baseAmount
     : balances.quoteAmount;
   if (availableOut < pending.outAmount) {
-    metrics.swapInventoryReject += 1;
     return {
       status: 503,
       body: {
@@ -132,6 +256,7 @@ export async function createSwap(
         available: availableOut.toString(),
         side: pending.direction === "buy" ? "base" : "quote",
       },
+      metric: "inventoryReject",
     };
   }
 
@@ -148,20 +273,20 @@ export async function createSwap(
 
   const baseVault = sdkAccounts.deriveVault(
     pending.poolAddr,
-    config.baseMint!,
+    config.baseMint,
     program.programId,
   )[0];
   const quoteVault = sdkAccounts.deriveVault(
     pending.poolAddr,
-    config.quoteMint!,
+    config.quoteMint,
     program.programId,
   )[0];
   const userBaseAta = getAssociatedTokenAddressSync(
-    config.baseMint!,
+    config.baseMint,
     pending.userPk,
   );
   const userQuoteAta = getAssociatedTokenAddressSync(
-    config.quoteMint!,
+    config.quoteMint,
     pending.userPk,
   );
 
@@ -187,8 +312,8 @@ export async function createSwap(
   const assembled = assembleSwapTx({
     userPk: pending.userPk,
     poolAddr: pending.poolAddr,
-    baseMint: config.baseMint!,
-    quoteMint: config.quoteMint!,
+    baseMint: config.baseMint,
+    quoteMint: config.quoteMint,
     baseVault,
     quoteVault,
     verifyIx: built.verifyIx,
@@ -199,7 +324,6 @@ export async function createSwap(
   // Successful /swap consumes the quote; a second call must request a fresh
   // quote/nonce.
   quoteStore.delete(pending.quoteId);
-  metrics.swapSuccess += 1;
 
   const response: SwapResponse = {
     quoteId: pending.quoteId,
@@ -221,5 +345,10 @@ export async function createSwap(
     },
   };
 
-  return { status: 200, body: response, log: { quoteId: pending.quoteId } };
+  return {
+    status: 200,
+    body: response,
+    metric: "success",
+    log: { quoteId: pending.quoteId },
+  };
 }

@@ -5,7 +5,7 @@ import type { ApiConfig } from "../../src/config.ts";
 import { newMetrics } from "../../src/metrics.ts";
 import { createQuoteStore } from "../../src/quote_store.ts";
 import { createSlidingWindowRateLimiter } from "../../src/rate_limit.ts";
-import type { ApiRuntime } from "../../src/runtime.ts";
+import type { ApiRuntime, ResolvedApiConfig } from "../../src/runtime.ts";
 import { createApiApp } from "../../src/http/app.ts";
 
 function runtime(overrides: Partial<ApiConfig> = {}): ApiRuntime {
@@ -13,7 +13,7 @@ function runtime(overrides: Partial<ApiConfig> = {}): ApiRuntime {
   const quoteMint = new PublicKey(
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
   );
-  const config: ApiConfig = {
+  const config: ResolvedApiConfig = {
     rpcUrl: "http://127.0.0.1:8899",
     rpcProvider: "test",
     quoteSignerWalletPath: "/tmp/quote.json",

@@ -24,7 +24,7 @@ import { createApiApp } from "./http/app.ts";
 import { newMetrics } from "./metrics.ts";
 import { createQuoteStore } from "./quote_store.ts";
 import { createSlidingWindowRateLimiter } from "./rate_limit.ts";
-import type { ApiRuntime } from "./runtime.ts";
+import type { ApiRuntime, ResolvedApiConfig } from "./runtime.ts";
 
 // Load SDK via CommonJS require to bypass Deno's strict ESM resolution.
 // The SDK now ships its own AnchorProvider / Wallet shim built on the
@@ -71,9 +71,15 @@ export async function startApiServer(
   const program = sdk.createProgram(provider);
   const programId = config.programIdOverride ?? sdk.PROGRAM_ID;
 
+  const resolvedConfig: ResolvedApiConfig = {
+    ...config,
+    baseMint: config.baseMint,
+    quoteMint: config.quoteMint,
+  };
+
   console.log(dim(`  Program:       ${programId.toBase58()}`));
-  console.log(dim(`  Base mint:     ${config.baseMint.toBase58()}`));
-  console.log(dim(`  Quote mint:    ${config.quoteMint.toBase58()}`));
+  console.log(dim(`  Base mint:     ${resolvedConfig.baseMint.toBase58()}`));
+  console.log(dim(`  Quote mint:    ${resolvedConfig.quoteMint.toBase58()}`));
 
   const metrics = newMetrics();
   const quoteStore = createQuoteStore();
@@ -83,7 +89,7 @@ export async function startApiServer(
   });
 
   const runtime: ApiRuntime = {
-    config,
+    config: resolvedConfig,
     connection,
     program,
     quoteSigner,

@@ -10,6 +10,15 @@ import type { QuoteRequest } from "../contracts.ts";
 const SLOW_WARN_MS = 250;
 
 export function quoteHandler(runtime: ApiRuntime) {
+  const quoteDeps = {
+    config: runtime.config,
+    connection: runtime.connection,
+    program: runtime.program,
+    quoteStore: runtime.quoteStore,
+    sdk: runtime.sdk,
+    sdkAccounts: runtime.sdkAccounts,
+  };
+
   return async (c: Context) => {
     const t0 = performance.now();
     runtime.metrics.quoteRequests += 1;
@@ -22,7 +31,7 @@ export function quoteHandler(runtime: ApiRuntime) {
     }
 
     try {
-      const result = await createQuote(runtime, body);
+      const result = await createQuote(quoteDeps, body);
       const latencyMs = performance.now() - t0;
 
       if (result.metric === "inventory") {

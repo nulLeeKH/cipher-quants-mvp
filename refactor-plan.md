@@ -569,3 +569,32 @@ export interface ApiAppDeps {
   별도 리팩토링으로 분리하는 편이 안전하다.
 - `/quote` 가격 계산은 기존 분리 모듈인 `computeQuotePricing`을 사용한다. 이
   모듈은 buy 방향에서 on-chain rounding 주석에 맞춰 ceil rounding을 사용한다.
+
+## 후속 실행 결과 메모 — Narrow service deps
+
+완료일: 2026-05-29
+
+- `ApiRuntime`은 composition/app/handler wiring 계층에 남기고, service 함수는
+  endpoint별 좁은 dependency object를 받도록 변경했다.
+- `ResolvedApiConfig`를 추가해 server bootstrap에서 `baseMint`/`quoteMint`
+  존재를 한 번 검증한 뒤 런타임 타입으로 보장한다.
+- `quote_service.ts`는 `QuoteServiceDeps`를 받으며 더 이상 `ApiRuntime`에
+  의존하지 않는다.
+- `swap_service.ts`는 `SwapServiceDeps`를 받으며 더 이상 `ApiRuntime` 또는
+  `Metrics`에 의존하지 않는다.
+- swap metric 증가는 `swapHandler`의 `recordSwapMetric`으로 이동했다.
+- `freshness_service.ts`를 추가해 `/freshness` handler도 필요한 dependency만
+  선택해 넘기도록 정리했다.
+- handler까지는 `ApiRuntime`을 허용하고, service 이하에는 narrow deps를 넘기는
+  경계를 적용했다.
+
+검증:
+
+- `cd api && deno task check` — PASS
+- `cd api && deno task test` — PASS, 57 passed
+- `cd api && find src tests -name '*.ts' -print0 | xargs -0 deno check --unstable-sloppy-imports`
+  — PASS
+- `cd api && deno fmt --check deno.json tests src/server.ts src/cache.ts src/rate_limit.ts src/http src/services src/quote_store.ts src/runtime.ts`
+  — PASS
+- `cd api && deno lint tests src/http/app.ts src/http/contracts.ts src/http/handlers src/http/middleware src/services src/quote_store.ts src/runtime.ts src/server.ts`
+  — PASS

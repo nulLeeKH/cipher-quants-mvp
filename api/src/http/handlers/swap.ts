@@ -2,13 +2,53 @@ import type { Context } from "@hono/hono";
 
 import { dim, red, yellow } from "@std/fmt/colors";
 
+import type { Metrics } from "../../metrics.ts";
 import type { ApiRuntime } from "../../runtime.ts";
-import { createSwap } from "../../services/swap_service.ts";
+import { createSwap, type SwapMetric } from "../../services/swap_service.ts";
 import type { SwapRequest } from "../contracts.ts";
 
 const SLOW_WARN_MS = 250;
 
+function recordSwapMetric(metrics: Metrics, metric: SwapMetric | undefined) {
+  switch (metric) {
+    case "clientFail":
+      metrics.swapClientFail += 1;
+      break;
+    case "pausedReject":
+      metrics.swapPausedReject += 1;
+      break;
+    case "expiredReject":
+      metrics.swapExpiredReject += 1;
+      break;
+    case "curveFreshReject":
+      metrics.swapCurveFreshReject += 1;
+      break;
+    case "driftReject":
+      metrics.swapDriftReject += 1;
+      break;
+    case "inventoryReject":
+      metrics.swapInventoryReject += 1;
+      break;
+    case "success":
+      metrics.swapSuccess += 1;
+      break;
+    case undefined:
+      break;
+  }
+}
+
 export function swapHandler(runtime: ApiRuntime) {
+  const swapDeps = {
+    config: runtime.config,
+    connection: runtime.connection,
+    program: runtime.program,
+    quoteSigner: runtime.quoteSigner,
+    quoteStore: runtime.quoteStore,
+    sdk: runtime.sdk,
+    sdkAccounts: runtime.sdkAccounts,
+    sdkInstructions: runtime.sdkInstructions,
+  };
+
   return async (c: Context) => {
     const t0 = performance.now();
     runtime.metrics.swapRequests += 1;
@@ -20,7 +60,8 @@ export function swapHandler(runtime: ApiRuntime) {
     }
 
     try {
-      const result = await createSwap(runtime, body);
+      const result = await createSwap(swapDeps, body);
+      recordSwapMetric(runtime.metrics, result.metric);
       const latencyMs = performance.now() - t0;
 
       if (result.status === 200 && result.log) {
