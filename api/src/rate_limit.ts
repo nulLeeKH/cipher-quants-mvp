@@ -24,7 +24,7 @@ export function createSlidingWindowRateLimiter(
 ): SlidingWindowRateLimiter {
   const now = opts.now ?? Date.now;
   const buckets = new Map<string, number[]>();
-  let cleanup: number | undefined;
+  let cleanup: ReturnType<typeof setInterval> | undefined;
 
   function isLimited(key: string, limit: number): boolean {
     const t = now();

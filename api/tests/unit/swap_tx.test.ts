@@ -1,22 +1,20 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
 import {
   ComputeBudgetProgram,
   Ed25519Program,
   Keypair,
   PublicKey,
-  SystemProgram,
   TransactionInstruction,
   VersionedTransaction,
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  TOKEN_PROGRAM_ID,
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { Buffer } from "node:buffer";
 
-import { assembleSwapTx, SWAP_CU_LIMIT } from "./swap_tx.ts";
+import { assembleSwapTx, SWAP_CU_LIMIT } from "../../src/swap_tx.ts";
 
 // Build a stub verify ix + stub swap ix with the right programIds so the
 // assembler's ordering is exercised without dragging in the full SDK.
@@ -27,7 +25,11 @@ function stubVerifyIx(): TransactionInstruction {
     message: new Uint8Array([1, 2, 3]),
   });
 }
-function stubSwapIx(programId: PublicKey, user: PublicKey, marker: PublicKey): TransactionInstruction {
+function stubSwapIx(
+  programId: PublicKey,
+  user: PublicKey,
+  marker: PublicKey,
+): TransactionInstruction {
   return new TransactionInstruction({
     programId,
     keys: [
@@ -38,13 +40,17 @@ function stubSwapIx(programId: PublicKey, user: PublicKey, marker: PublicKey): T
   });
 }
 
-const PROGRAM_ID = new PublicKey("3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy");
+const PROGRAM_ID = new PublicKey(
+  "3br2wCsENbm6GfH3cfJVzZK5GKWNJZBD6oEX2rMNxNMy",
+);
 
 function makeParams() {
   const user = Keypair.generate().publicKey;
   const marker = Keypair.generate().publicKey;
   const baseMint = new PublicKey("So11111111111111111111111111111111111111112");
-  const quoteMint = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+  const quoteMint = new PublicKey(
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+  );
   return {
     userPk: user,
     poolAddr: Keypair.generate().publicKey,
@@ -64,7 +70,7 @@ Deno.test("assembleSwapTx — emits 5 ixs in canonical order", () => {
   // 0 = ComputeBudget setComputeUnitLimit
   assertEquals(
     r.instructions[0].programId.toBase58(),
-    ComputeBudgetProgram.programId.toBase58()
+    ComputeBudgetProgram.programId.toBase58(),
   );
   // CU-limit ix discriminator = 0x02 followed by little-endian u32 for the limit.
   // Quick sanity: data length should be 5 (1 tag + 4 u32 LE).
@@ -76,11 +82,11 @@ Deno.test("assembleSwapTx — emits 5 ixs in canonical order", () => {
   // 1 + 2 = ATA idempotent creates (programId = ASSOCIATED_TOKEN_PROGRAM_ID)
   assertEquals(
     r.instructions[1].programId.toBase58(),
-    ASSOCIATED_TOKEN_PROGRAM_ID.toBase58()
+    ASSOCIATED_TOKEN_PROGRAM_ID.toBase58(),
   );
   assertEquals(
     r.instructions[2].programId.toBase58(),
-    ASSOCIATED_TOKEN_PROGRAM_ID.toBase58()
+    ASSOCIATED_TOKEN_PROGRAM_ID.toBase58(),
   );
   // idempotent variant = data[0] === 0x01 (standard creates have data[]===[])
   assertEquals(r.instructions[1].data[0], 1);
@@ -89,7 +95,7 @@ Deno.test("assembleSwapTx — emits 5 ixs in canonical order", () => {
   // 3 = ed25519 verify (must precede execute_swap)
   assertEquals(
     r.instructions[3].programId.toBase58(),
-    Ed25519Program.programId.toBase58()
+    Ed25519Program.programId.toBase58(),
   );
 
   // 4 = execute_swap (owned by our program)
@@ -101,11 +107,11 @@ Deno.test("assembleSwapTx — ATA addresses match user + mints", () => {
   const r = assembleSwapTx(params);
   assertEquals(
     r.userBaseAta.toBase58(),
-    getAssociatedTokenAddressSync(params.baseMint, params.userPk).toBase58()
+    getAssociatedTokenAddressSync(params.baseMint, params.userPk).toBase58(),
   );
   assertEquals(
     r.userQuoteAta.toBase58(),
-    getAssociatedTokenAddressSync(params.quoteMint, params.userPk).toBase58()
+    getAssociatedTokenAddressSync(params.quoteMint, params.userPk).toBase58(),
   );
 });
 
@@ -126,7 +132,7 @@ Deno.test("assembleSwapTx — fee payer == user (sole signer)", () => {
   // Account keys[0] is the fee payer in compiled v0 messages.
   assertEquals(
     vtx.message.staticAccountKeys[0].toBase58(),
-    params.userPk.toBase58()
+    params.userPk.toBase58(),
   );
   // Single signature slot, zero-filled placeholder.
   assertEquals(vtx.signatures.length, 1);
@@ -136,10 +142,10 @@ Deno.test("assembleSwapTx — fee payer == user (sole signer)", () => {
 Deno.test("assembleSwapTx — verify ix immediately precedes execute_swap (on-chain invariant)", () => {
   const r = assembleSwapTx(makeParams());
   const verifyIdx = r.instructions.findIndex(
-    (ix) => ix.programId.toBase58() === Ed25519Program.programId.toBase58()
+    (ix) => ix.programId.toBase58() === Ed25519Program.programId.toBase58(),
   );
   const swapIdx = r.instructions.findIndex(
-    (ix) => ix.programId.toBase58() === PROGRAM_ID.toBase58()
+    (ix) => ix.programId.toBase58() === PROGRAM_ID.toBase58(),
   );
   // execute_swap's verify_signed_quote_signature reads "previous ix" from the
   // Instructions sysvar; failing this layout makes every RFQ swap reject
@@ -154,6 +160,8 @@ Deno.test("SWAP_CU_LIMIT is sized within Solana's 1.4M tx cap", () => {
     throw new Error(`SWAP_CU_LIMIT=${SWAP_CU_LIMIT} exceeds runtime cap`);
   }
   if (SWAP_CU_LIMIT < 100_000) {
-    throw new Error(`SWAP_CU_LIMIT=${SWAP_CU_LIMIT} too low — RFQ path needs ≥~125k`);
+    throw new Error(
+      `SWAP_CU_LIMIT=${SWAP_CU_LIMIT} too low — RFQ path needs ≥~125k`,
+    );
   }
 });

@@ -1,6 +1,6 @@
-import { assertEquals, assertExists } from "jsr:@std/assert@1";
+import { assertEquals, assertExists } from "@std/assert";
 
-import { loadConfig } from "./config.ts";
+import { loadConfig } from "../../src/config.ts";
 
 // Snapshot/restore the env to keep tests isolated; envRequired calls
 // Deno.exit on missing values so each test must provide RPC_URL.
@@ -23,7 +23,10 @@ const ENV_KEYS = [
   "VERBOSE",
 ];
 
-function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T): T {
+function withEnv<T>(
+  overrides: Record<string, string | undefined>,
+  fn: () => T,
+): T {
   const prev: Record<string, string | undefined> = {};
   for (const k of ENV_KEYS) prev[k] = Deno.env.get(k);
   for (const k of ENV_KEYS) Deno.env.delete(k);
@@ -42,7 +45,10 @@ function withEnv<T>(overrides: Record<string, string | undefined>, fn: () => T):
 }
 
 Deno.test("loadConfig — minimal env (RPC_URL only) supplies defaults", () => {
-  const cfg = withEnv({ RPC_URL: "http://127.0.0.1:8899" }, () => loadConfig({}));
+  const cfg = withEnv(
+    { RPC_URL: "http://127.0.0.1:8899" },
+    () => loadConfig({}),
+  );
   assertEquals(cfg.rpcUrl, "http://127.0.0.1:8899");
   assertEquals(cfg.rpcProvider, "unknown");
   assertEquals(cfg.port, 8080);

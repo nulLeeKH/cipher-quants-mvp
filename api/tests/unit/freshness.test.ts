@@ -1,6 +1,6 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
-import { computeFreshness } from "./freshness.ts";
+import { computeFreshness } from "../../src/freshness.ts";
 
 Deno.test("computeFreshness — fresh inside TTL window", () => {
   const f = computeFreshness({

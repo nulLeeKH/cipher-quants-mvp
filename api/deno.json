@@ -8,7 +8,7 @@
     "dev": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts",
     "start": "deno run --allow-read --allow-write --allow-env --allow-net --allow-sys --unstable-sloppy-imports src/main.ts",
     "check": "deno check --unstable-sloppy-imports src/main.ts",
-    "test": "deno test --unstable-sloppy-imports --no-check --allow-env --allow-read --allow-write --allow-sys --allow-net src/",
+    "test": "deno test --unstable-sloppy-imports --no-check --allow-env --allow-read --allow-write --allow-sys --allow-net tests/",
     "compile": "deno compile -A --unstable-sloppy-imports --output api-server src/main.ts"
   },
   "imports": {
@@ -17,6 +17,7 @@
     "@solana/spl-token": "npm:@solana/spl-token@0.4.14",
     "bn.js": "npm:bn.js@5.2.1",
     "buffer": "node:buffer",
+    "@std/assert": "jsr:@std/assert@1",
     "@std/cli": "jsr:@std/cli@1.0.0",
     "@std/fmt": "jsr:@std/fmt@1.0.0",
     "@std/dotenv": "jsr:@std/dotenv@0.225.0",
@@ -25,8 +26,18 @@
   "compilerOptions": {
     "strict": true,
     "noImplicitAny": true,
-    "lib": ["deno.window", "deno.ns", "esnext"]
+    "lib": [
+      "deno.window",
+      "deno.ns",
+      "esnext"
+    ],
+    "types": [
+      "npm:@types/node@22.15.15"
+    ]
   },
-  "unstable": ["sloppy-imports", "detect-cjs"],
+  "unstable": [
+    "sloppy-imports",
+    "detect-cjs"
+  ],
   "nodeModulesDir": "auto"
 }

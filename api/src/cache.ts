@@ -32,7 +32,7 @@ export function createBoundedTtlCache<T>(
 ): BoundedTtlCache<T> {
   const now = opts.now ?? Date.now;
   const entries = new Map<string, { value: T; expiresAtMs: number }>();
-  let sweepTimer: number | undefined;
+  let sweepTimer: ReturnType<typeof setInterval> | undefined;
 
   function set(key: string, value: T): void {
     const expiresAtMs = now() + opts.ttlMs;
