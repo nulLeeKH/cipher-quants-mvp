@@ -10,6 +10,7 @@
     "npm:@solana/spl-token@0.4.14": "0.4.14_@solana+web3.js@1.98.0",
     "npm:@solana/web3.js@1.98.0": "1.98.0",
     "npm:@types/node@*": "22.15.15",
+    "npm:@types/node@22.15.15": "22.15.15",
     "npm:bn.js@5.2.1": "5.2.1"
   },
   "jsr": {
@@ -439,11 +440,13 @@
   "workspace": {
     "dependencies": [
       "jsr:@hono/hono@^4.6.0",
+      "jsr:@std/assert@1",
       "jsr:@std/cli@1.0.0",
       "jsr:@std/dotenv@0.225.0",
       "jsr:@std/fmt@1.0.0",
       "npm:@solana/spl-token@0.4.14",
       "npm:@solana/web3.js@1.98.0",
+      "npm:@types/node@22.15.15",
       "npm:bn.js@5.2.1"
     ]
   }

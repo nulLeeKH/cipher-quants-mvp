@@ -1,6 +1,6 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
-import { nextQuoteNonce } from "./nonce.ts";
+import { nextQuoteNonce } from "../../src/nonce.ts";
 
 Deno.test("nextQuoteNonce — returns a bigint in u64 range", () => {
   const n = nextQuoteNonce();
@@ -23,7 +23,12 @@ Deno.test("nextQuoteNonce — no collisions across 10k draws (high entropy)", ()
 Deno.test("nextQuoteNonce — accepts injected RNG (reproducibility for tests)", () => {
   const fakeBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
   // deno-lint-ignore no-explicit-any
-  const rng: any = { getRandomValues: (out: Uint8Array) => { out.set(fakeBytes); return out; } };
+  const rng: any = {
+    getRandomValues: (out: Uint8Array) => {
+      out.set(fakeBytes);
+      return out;
+    },
+  };
   const n = nextQuoteNonce(rng);
   // LE: bytes 01..08 → 0x0807060504030201
   assertEquals(n.toString(16), "807060504030201");

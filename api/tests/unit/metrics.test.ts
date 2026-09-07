@@ -1,6 +1,11 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
-import { newMetrics, percentile, recordLatency, renderMetrics } from "./metrics.ts";
+import {
+  newMetrics,
+  percentile,
+  recordLatency,
+  renderMetrics,
+} from "../../src/metrics.ts";
 
 Deno.test("percentile — empty → 0", () => {
   assertEquals(percentile([], 50), 0);
@@ -54,13 +59,17 @@ Deno.test("renderMetrics — includes counter names + Prometheus headers", () =>
   const out = renderMetrics(m);
   if (!out.includes("cipher_quote_requests_total 7")) throw new Error(out);
   if (!out.includes("cipher_quote_success_total 5")) throw new Error(out);
-  if (!out.includes("cipher_quote_inventory_fail_total 1")) throw new Error(out);
+  if (!out.includes("cipher_quote_inventory_fail_total 1")) {
+    throw new Error(out);
+  }
   if (!out.includes("cipher_quote_other_fail_total 1")) throw new Error(out);
   if (!out.includes("cipher_swap_requests_total 4")) throw new Error(out);
   if (!out.includes("cipher_swap_success_total 2")) throw new Error(out);
   if (!out.includes("cipher_swap_drift_reject_total 1")) throw new Error(out);
   if (!out.includes("cipher_swap_expired_reject_total 1")) throw new Error(out);
-  if (!out.includes(`cipher_quote_latency_ms{quantile="0.95"}`)) throw new Error(out);
+  if (!out.includes(`cipher_quote_latency_ms{quantile="0.95"}`)) {
+    throw new Error(out);
+  }
   if (!out.includes("# HELP")) throw new Error(out);
   if (!out.includes("# TYPE")) throw new Error(out);
   if (!out.includes("cipher_quote_latency_samples 3")) throw new Error(out);

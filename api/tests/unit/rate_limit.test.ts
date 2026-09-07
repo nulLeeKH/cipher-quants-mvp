@@ -1,8 +1,10 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
-import { createSlidingWindowRateLimiter } from "./rate_limit.ts";
+import { createSlidingWindowRateLimiter } from "../../src/rate_limit.ts";
 
-function mkClock(start = 1_000): { now: () => number; advance: (ms: number) => void } {
+function mkClock(
+  start = 1_000,
+): { now: () => number; advance: (ms: number) => void } {
   let t = start;
   return { now: () => t, advance: (ms) => (t += ms) };
 }

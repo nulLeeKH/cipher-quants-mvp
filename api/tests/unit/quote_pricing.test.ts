@@ -1,8 +1,7 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert@1";
+import { assertEquals, assertThrows } from "@std/assert";
 
-import { computeQuotePricing } from "./quote_pricing.ts";
+import { computeQuotePricing } from "../../src/quote_pricing.ts";
 
-const PRICE_SCALE = 1_000_000n;
 const FAIR = 100_000_000n; // $100 in PRICE_SCALE units (equal-decimal pair)
 
 Deno.test("quote pricing — Buy: price above fair (half spread up)", () => {

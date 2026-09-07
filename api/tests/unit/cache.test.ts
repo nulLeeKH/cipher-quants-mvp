@@ -1,16 +1,22 @@
-import { assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "@std/assert";
 
-import { createBoundedTtlCache } from "./cache.ts";
+import { createBoundedTtlCache } from "../../src/cache.ts";
 
 // Controllable clock so we don't actually wait for ms to pass.
-function mkClock(start = 1_000): { now: () => number; advance: (ms: number) => void } {
+function mkClock(
+  start = 1_000,
+): { now: () => number; advance: (ms: number) => void } {
   let t = start;
   return { now: () => t, advance: (ms) => (t += ms) };
 }
 
 Deno.test("cache — set/get round-trip within TTL", () => {
   const clk = mkClock();
-  const c = createBoundedTtlCache<string>({ maxEntries: 10, ttlMs: 1_000, now: clk.now });
+  const c = createBoundedTtlCache<string>({
+    maxEntries: 10,
+    ttlMs: 1_000,
+    now: clk.now,
+  });
   c.set("k", "v");
   assertEquals(c.get("k"), "v");
   clk.advance(500);
@@ -20,7 +26,11 @@ Deno.test("cache — set/get round-trip within TTL", () => {
 
 Deno.test("cache — expired entry is dropped lazily on get", () => {
   const clk = mkClock();
-  const c = createBoundedTtlCache<string>({ maxEntries: 10, ttlMs: 1_000, now: clk.now });
+  const c = createBoundedTtlCache<string>({
+    maxEntries: 10,
+    ttlMs: 1_000,
+    now: clk.now,
+  });
   c.set("k", "v");
   clk.advance(1_001);
   assertEquals(c.get("k"), undefined);
@@ -30,7 +40,11 @@ Deno.test("cache — expired entry is dropped lazily on get", () => {
 
 Deno.test("cache — re-set extends TTL (re-insert at tail)", () => {
   const clk = mkClock();
-  const c = createBoundedTtlCache<string>({ maxEntries: 10, ttlMs: 1_000, now: clk.now });
+  const c = createBoundedTtlCache<string>({
+    maxEntries: 10,
+    ttlMs: 1_000,
+    now: clk.now,
+  });
   c.set("k", "v");
   clk.advance(800);
   c.set("k", "v2"); // resets TTL
@@ -41,7 +55,11 @@ Deno.test("cache — re-set extends TTL (re-insert at tail)", () => {
 
 Deno.test("cache — eviction respects maxEntries (FIFO/LRU by insertion)", () => {
   const clk = mkClock();
-  const c = createBoundedTtlCache<number>({ maxEntries: 3, ttlMs: 100_000, now: clk.now });
+  const c = createBoundedTtlCache<number>({
+    maxEntries: 3,
+    ttlMs: 100_000,
+    now: clk.now,
+  });
   c.set("a", 1);
   c.set("b", 2);
   c.set("c", 3);
@@ -55,7 +73,11 @@ Deno.test("cache — eviction respects maxEntries (FIFO/LRU by insertion)", () =
 
 Deno.test("cache — re-setting a key moves it to the tail (avoids eviction)", () => {
   const clk = mkClock();
-  const c = createBoundedTtlCache<number>({ maxEntries: 3, ttlMs: 100_000, now: clk.now });
+  const c = createBoundedTtlCache<number>({
+    maxEntries: 3,
+    ttlMs: 100_000,
+    now: clk.now,
+  });
   c.set("a", 1);
   c.set("b", 2);
   c.set("c", 3);
